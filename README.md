@@ -54,8 +54,8 @@ src/
 | M3 | Terrain & resource tiles (procedural art) | ✅ |
 | M4 | Roads & settlements (placement sandbox) | ✅ |
 | M5 | Camera controls | ✅ |
-| M6 | Dice | ⏳ next |
-| M7 | Resource production | ⏳ |
+| M6 | Dice | ✅ |
+| M7 | Resource production | ⏳ next |
 | M8 | Player turns (boardgame.io local) | ⏳ |
 | M9 | Building rules | ⏳ |
 | M10 | Trading | ⏳ |
@@ -65,9 +65,10 @@ src/
 
 Details and acceptance criteria per milestone: [`PRD.md §6`](./PRD.md).
 
-## Playing today (M5 sandbox)
+## Playing today (M6 sandbox)
 
 - Drag to rotate, scroll to zoom, right-drag to pan.
 - Pick a player color, choose **Road** or **Settlement**, click a highlighted edge/corner to place; click a placed piece again to remove it.
 - Hover hexes to inspect terrain, resource and number token.
+- **Roll dice** throws two animated 3D dice onto the ocean; a 7 enters robber mode — click any hex to move him (steal/discard flow lands in M8).
 - **New island** regenerates the board from a fresh seed (free placement — rule enforcement arrives in M9).

@@ -46,7 +46,7 @@ export interface HoverInfo {
 }
 
 export interface PickTarget {
-  kind: 'vertex' | 'edge'
+  kind: 'vertex' | 'edge' | 'tile'
   id: string
 }
 
@@ -151,6 +151,89 @@ function tokenTexture(n: number): THREE.CanvasTexture {
   return tex
 }
 
+// --- dice ---------------------------------------------------------------------
+// BoxGeometry material slot order is [+x, -x, +y, -y, +z, -z]; opposite faces
+// sum to 7 (1/6, 2/5, 3/4) like a real die. Textures are built lazily because
+// they need `document` (SSR-safe).
+
+const DIE_SIZE = 0.34
+const DIE_REST_Y = 0.15 // half die above the ocean surface (top ≈ -0.02)
+const dieGeometry = new THREE.BoxGeometry(DIE_SIZE, DIE_SIZE, DIE_SIZE)
+const dieSlotValues = [1, 6, 2, 5, 3, 4] as const // per material slot above
+const DIE_NORMALS: Record<number, THREE.Vector3> = {
+  1: new THREE.Vector3(1, 0, 0),
+  6: new THREE.Vector3(-1, 0, 0),
+  2: new THREE.Vector3(0, 1, 0),
+  5: new THREE.Vector3(0, -1, 0),
+  3: new THREE.Vector3(0, 0, 1),
+  4: new THREE.Vector3(0, 0, -1),
+}
+
+/** 3×3 pip grid positions per face value (col, row), shared layout as the UI dice. */
+const PIP_SPOTS: Record<number, [number, number][]> = {
+  1: [[1, 1]],
+  2: [[0, 0], [2, 2]],
+  3: [[0, 0], [1, 1], [2, 2]],
+  4: [[0, 0], [2, 0], [0, 2], [2, 2]],
+  5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]],
+  6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]],
+}
+
+const dieFaceTextureCache = new Map<number, THREE.CanvasTexture>()
+function dieFaceTexture(v: number): THREE.CanvasTexture {
+  let tex = dieFaceTextureCache.get(v)
+  if (tex) return tex
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 256
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = '#f6f1e2'
+  ctx.fillRect(0, 0, 256, 256)
+  ctx.strokeStyle = 'rgba(60, 48, 30, 0.18)'
+  ctx.lineWidth = 12
+  ctx.strokeRect(6, 6, 244, 244)
+  ctx.fillStyle = '#2e2a33'
+  for (const [c, r] of PIP_SPOTS[v]) {
+    ctx.beginPath()
+    ctx.arc(56 + c * 72, 56 + r * 72, 27, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  tex = new THREE.CanvasTexture(canvas)
+  tex.anisotropy = 4
+  tex.colorSpace = THREE.SRGBColorSpace
+  dieFaceTextureCache.set(v, tex)
+  return tex
+}
+
+let dieMaterials: THREE.MeshStandardMaterial[] | null = null
+function getDieMaterials(): THREE.MeshStandardMaterial[] {
+  if (!dieMaterials) {
+    dieMaterials = dieSlotValues.map(
+      (v) => new THREE.MeshStandardMaterial({ map: dieFaceTexture(v), roughness: 0.35, metalness: 0.05 }),
+    )
+  }
+  return dieMaterials
+}
+
+/** Quaternion that brings face `v` of an unrotated die to point up. */
+function dieFaceUpQuaternion(v: number): THREE.Quaternion {
+  return new THREE.Quaternion().setFromUnitVectors(DIE_NORMALS[v], new THREE.Vector3(0, 1, 0))
+}
+
+interface DieAnim {
+  mesh: THREE.Mesh
+  from: THREE.Vector3
+  target: THREE.Vector3
+  spinAxis: THREE.Vector3
+  spinRate: number
+  finalQuat: THREE.Quaternion
+  settleFrom: THREE.Quaternion | null
+  t: number // starts negative → per-die throw delay
+  settled: boolean
+}
+
+const ROBBER_TILE_BASE_OPACITY = 0.14
+const robberTileGeometry = new THREE.CylinderGeometry(0.97, 0.97, 0.035, 6)
+
 // ---------------------------------------------------------------------------
 // GameView
 // ---------------------------------------------------------------------------
@@ -169,6 +252,8 @@ export class GameView {
   private boardGroup = new THREE.Group()
   private buildingsGroup = new THREE.Group()
   private ghostsGroup = new THREE.Group()
+  private diceGroup = new THREE.Group()
+  private robberTilesGroup = new THREE.Group()
   private waterMesh: THREE.Mesh | null = null
 
   // lookups
@@ -190,9 +275,22 @@ export class GameView {
   // camera intro animation
   private intro = { active: false, t: 0, from: new THREE.Vector3(), to: new THREE.Vector3() }
 
+  // dice
+  private diceMeshes: THREE.Mesh[] = []
+  private diceAnim: { dice: DieAnim[] } | null = null
+
+  // robber
+  private robber: THREE.Group | null = null
+  private robberTileId: string | null = null
+  private robberHop: { t: number; from: THREE.Vector3; to: THREE.Vector3 } | null = null
+  private robberMode = false
+  private robberTileMeshes = new Map<string, THREE.Mesh>()
+  private hoveredRobberTile: THREE.Mesh | null = null
+
   // public callbacks
   onPick: ((target: PickTarget) => void) | null = null
   onHover: ((info: HoverInfo | null) => void) | null = null
+  onRollDone: (() => void) | null = null
 
   constructor(container: HTMLElement) {
     this.container = container
@@ -226,7 +324,7 @@ export class GameView {
     }
 
     this.setupLights()
-    this.scene.add(this.boardGroup, this.buildingsGroup, this.ghostsGroup)
+    this.scene.add(this.boardGroup, this.buildingsGroup, this.ghostsGroup, this.diceGroup, this.robberTilesGroup)
 
     // translucent hover highlight overlay for tiles
     this.hoverHex = new THREE.Mesh(
@@ -271,6 +369,7 @@ export class GameView {
     }
 
     this.addRobber(board)
+    this.buildRobberTiles(board)
     this.addOcean()
     this.rebuildGhosts()
     this.setPlacements(this.placements)
@@ -321,6 +420,65 @@ export class GameView {
     this.mode = mode
     this.ghostsGroup.visible = mode.kind !== null
     this.refreshGhosts()
+  }
+
+  /** Throw two dice that tumble, bounce and settle showing die1/die2 face-up. */
+  rollDice(die1: number, die2: number) {
+    if (this.diceMeshes.length === 0) this.createDice()
+    const restY = DIE_REST_Y
+    const spawns = [new THREE.Vector3(-4.4, 2.9, 7.3), new THREE.Vector3(4.4, 3.2, 7.4)]
+    const targets = [new THREE.Vector3(-0.62, restY, 3.35), new THREE.Vector3(0.66, restY, 3.62)]
+    const values = [die1, die2]
+    const dice: DieAnim[] = this.diceMeshes.map((mesh, i) => {
+      const target = targets[i].clone()
+      target.x += (Math.random() - 0.5) * 0.3
+      target.z += (Math.random() - 0.5) * 0.2
+      const spinAxis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
+      const finalQuat = new THREE.Quaternion()
+        .setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2)
+        .multiply(dieFaceUpQuaternion(values[i]))
+      mesh.visible = true
+      mesh.scale.setScalar(1)
+      mesh.position.copy(spawns[i])
+      mesh.quaternion.identity()
+      return {
+        mesh,
+        from: spawns[i].clone(),
+        target,
+        spinAxis,
+        spinRate: 9 + Math.random() * 5,
+        finalQuat,
+        settleFrom: null,
+        t: -0.09 * i,
+        settled: false,
+      }
+    })
+    this.diceAnim = { dice }
+  }
+
+  /** Move the robber to a tile (animated hop unless `animate` is false). */
+  setRobberTile(tileId: string, animate = true) {
+    if (!this.board || !this.robber || tileId === this.robberTileId) return
+    const tile = this.board.tileById.get(tileId)
+    if (!tile) return
+    this.robberTileId = tileId
+    this.refreshRobberTiles()
+    if (animate) {
+      this.robberHop = { t: 0, from: this.robber.position.clone(), to: new THREE.Vector3(tile.x, TILE_TOP, tile.z) }
+    } else {
+      this.robber.position.set(tile.x, TILE_TOP, tile.z)
+    }
+  }
+
+  /** Robber mode: highlight every tile the robber may move to and pick clicks. */
+  setRobberMode(active: boolean) {
+    this.robberMode = active
+    this.robberTilesGroup.visible = active
+    if (!active) {
+      this.hoveredRobberTile = null
+      this.container.style.cursor = 'default'
+    }
+    this.refreshRobberTiles()
   }
 
   dispose() {
@@ -456,15 +614,62 @@ export class GameView {
 
   private addRobber(board: Board) {
     const desert = board.tileById.get(board.desertTileId)!
-    const g = new THREE.Group()
-    const base = new THREE.Mesh(propGeo.robberBase, propMat.robber)
-    base.position.y = 0.21
-    base.castShadow = true
-    const head = new THREE.Mesh(propGeo.robberHead, propMat.robber)
-    head.position.y = 0.48
-    g.add(base, head)
-    g.position.set(desert.x, TILE_TOP, desert.z)
-    this.boardGroup.add(g)
+    if (!this.robber) {
+      const g = new THREE.Group()
+      const base = new THREE.Mesh(propGeo.robberBase, propMat.robber)
+      base.position.y = 0.21
+      base.castShadow = true
+      const head = new THREE.Mesh(propGeo.robberHead, propMat.robber)
+      head.position.y = 0.48
+      head.castShadow = true
+      g.add(base, head)
+      this.robber = g
+    }
+    this.robberTileId = board.desertTileId
+    this.robber.position.set(desert.x, TILE_TOP, desert.z)
+    this.boardGroup.add(this.robber)
+  }
+
+  /** Translucent red overlays marking legal robber destinations. */
+  private buildRobberTiles(board: Board) {
+    this.clearGroup(this.robberTilesGroup)
+    this.robberTileMeshes.clear()
+    for (const tile of board.tiles) {
+      const mesh = new THREE.Mesh(
+        robberTileGeometry,
+        new THREE.MeshBasicMaterial({
+          color: 0xd7443e,
+          transparent: true,
+          opacity: ROBBER_TILE_BASE_OPACITY,
+          depthWrite: false,
+        }),
+      )
+      mesh.rotation.y = Math.PI / 6
+      mesh.position.set(tile.x, TILE_TOP + 0.03, tile.z)
+      mesh.userData.tileId = tile.id
+      this.robberTilesGroup.add(mesh)
+      this.robberTileMeshes.set(tile.id, mesh)
+      this.disposables.push(mesh.material as THREE.Material)
+    }
+    this.robberTilesGroup.visible = this.robberMode
+    this.refreshRobberTiles()
+  }
+
+  private refreshRobberTiles() {
+    for (const [id, mesh] of this.robberTileMeshes) {
+      mesh.visible = id !== this.robberTileId
+      ;(mesh.material as THREE.MeshBasicMaterial).opacity = ROBBER_TILE_BASE_OPACITY
+    }
+  }
+
+  private createDice() {
+    for (let i = 0; i < 2; i++) {
+      const mesh = new THREE.Mesh(dieGeometry, getDieMaterials())
+      mesh.castShadow = true
+      mesh.visible = false
+      this.diceGroup.add(mesh)
+      this.diceMeshes.push(mesh)
+    }
   }
 
   private addOcean() {
@@ -579,6 +784,22 @@ export class GameView {
   private onPointerMove = (ev: PointerEvent) => {
     if (!this.board) return
     this.setPointer(ev)
+
+    // robber mode: highlight the hovered destination tile, suppress build ghosts
+    if (this.robberMode) {
+      const tileHits = this.raycaster.intersectObjects([...this.tileMeshes.values()], false)
+      const tileMesh = tileHits[0]?.object as THREE.Mesh | undefined
+      const overlay = tileMesh ? (this.robberTileMeshes.get(tileMesh.userData.tileId as string) ?? null) : null
+      const target = overlay && overlay.visible ? overlay : null
+      if (target !== this.hoveredRobberTile) {
+        this.hoveredRobberTile = target
+        this.container.style.cursor = target ? 'pointer' : 'default'
+      }
+      this.hoverHex.visible = false
+      this.onHover?.(null)
+      return
+    }
+
     const ghosts = this.visibleGhosts()
     const ghostHits = this.raycaster.intersectObjects(ghosts, false)
     const ghost = (ghostHits[0]?.object as THREE.Mesh | undefined) ?? null
@@ -620,8 +841,19 @@ export class GameView {
     const moved = Math.hypot(ev.clientX - this.downAt.x, ev.clientY - this.downAt.y)
     const elapsed = performance.now() - this.downAt.t
     if (moved > 6 || elapsed > 600) return // it was a camera drag, not a click
-    if (!this.mode.kind || !this.board) return
+    if (!this.board) return
     this.setPointer(ev)
+
+    // robber mode: any highlighted tile click moves the robber
+    if (this.robberMode) {
+      const tileHits = this.raycaster.intersectObjects([...this.tileMeshes.values()], false)
+      const tileMesh = tileHits[0]?.object as THREE.Mesh | undefined
+      const tileId = tileMesh?.userData.tileId as string | undefined
+      if (tileId && tileId !== this.robberTileId) this.onPick?.({ kind: 'tile', id: tileId })
+      return
+    }
+
+    if (!this.mode.kind) return
     const hits = this.raycaster.intersectObjects(this.visibleGhosts(), false)
     const ghost = hits[0]?.object as THREE.Mesh | undefined
     if (ghost) {
@@ -685,13 +917,104 @@ export class GameView {
 
     if (this.waterMesh) this.waterMesh.position.y = -0.17 + Math.sin(t * 0.7) * 0.018
 
+    this.updateDice(dt)
+    this.updateRobber(dt, t)
+
     this.renderer.render(this.scene, this.camera)
+  }
+
+  private updateDice(dt: number) {
+    if (!this.diceAnim) return
+    const FLIGHT = 0.6
+    const B1 = 0.26
+    const B2 = 0.2
+    const SETTLE = 0.34
+    let allSettled = true
+
+    for (const d of this.diceAnim.dice) {
+      if (d.settled) continue
+      d.t += dt
+      if (d.t < 0) {
+        allSettled = false
+        continue
+      }
+      const t = d.t
+      const restY = d.target.y
+      const phase = t < FLIGHT ? 0 : t < FLIGHT + B1 ? 1 : t < FLIGHT + B1 + B2 ? 2 : 3
+
+      if (phase === 0) {
+        // throw: travel out, fall in, tumble fast
+        const u = t / FLIGHT
+        const horiz = 1 - (1 - u) * (1 - u)
+        d.mesh.position.x = d.from.x + (d.target.x - d.from.x) * horiz
+        d.mesh.position.z = d.from.z + (d.target.z - d.from.z) * horiz
+        d.mesh.position.y = d.from.y + (restY - d.from.y) * u * u
+        d.mesh.rotateOnWorldAxis(d.spinAxis, d.spinRate * dt)
+        allSettled = false
+      } else if (phase === 1 || phase === 2) {
+        // bounces: vertical parabolas, tumbling decays per bounce
+        const h = phase === 1 ? 0.55 : 0.18
+        const dur = phase === 1 ? B1 : B2
+        const u = (t - (phase === 1 ? FLIGHT : FLIGHT + B1)) / dur
+        d.mesh.position.x = d.target.x
+        d.mesh.position.z = d.target.z
+        d.mesh.position.y = restY + h * 4 * u * (1 - u)
+        d.mesh.rotateOnWorldAxis(d.spinAxis, d.spinRate * Math.pow(0.42, phase) * dt)
+        allSettled = false
+      } else {
+        // settle: slerp to the exact face-up orientation with a little pop
+        const u = Math.min(1, (t - FLIGHT - B1 - B2) / SETTLE)
+        if (!d.settleFrom) d.settleFrom = d.mesh.quaternion.clone()
+        const e = 1 - Math.pow(1 - u, 3)
+        d.mesh.quaternion.slerpQuaternions(d.settleFrom, d.finalQuat, e)
+        d.mesh.scale.setScalar(1 + 0.16 * Math.sin(Math.PI * u))
+        d.mesh.position.y = restY
+        if (u >= 1) {
+          d.settled = true
+          d.mesh.quaternion.copy(d.finalQuat)
+          d.mesh.scale.setScalar(1)
+        } else {
+          allSettled = false
+        }
+      }
+    }
+
+    if (allSettled) {
+      this.diceAnim = null
+      this.onRollDone?.()
+    }
+  }
+
+  private updateRobber(dt: number, t: number) {
+    if (this.robberHop && this.robber) {
+      const h = this.robberHop
+      h.t += dt
+      const u = Math.min(1, h.t / 0.55)
+      this.robber.position.lerpVectors(h.from, h.to, u)
+      this.robber.position.y += Math.sin(Math.PI * u) * 1.05
+      this.robber.rotation.y += dt * 5
+      if (u >= 1) {
+        this.robberHop = null
+        this.robber.rotation.y = 0
+      }
+    }
+    if (this.robberTilesGroup.visible) {
+      const base = ROBBER_TILE_BASE_OPACITY + 0.05 + 0.05 * Math.sin(t * 5)
+      for (const mesh of this.robberTileMeshes.values()) {
+        if (mesh !== this.hoveredRobberTile) {
+          ;(mesh.material as THREE.MeshBasicMaterial).opacity = base
+        } else {
+          ;(mesh.material as THREE.MeshBasicMaterial).opacity = 0.5
+        }
+      }
+    }
   }
 
   private clearGroup(group: THREE.Group) {
     if (group === this.boardGroup) {
-      // keep the ocean meshes out of the disposables double-free path
+      // keep the ocean + robber meshes out of the disposables double-free path
       this.waterMesh?.removeFromParent()
+      this.robber?.removeFromParent()
     }
     for (const child of [...group.children]) child.removeFromParent()
   }

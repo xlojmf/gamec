@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { GameCanvas } from '#/components/GameCanvas'
+import { GameCanvas, type RollTrigger } from '#/components/GameCanvas'
 import {
   PLAYER_COLORS,
   PLAYER_COUNT,
@@ -12,11 +12,32 @@ import {
 } from '#/three/GameView'
 import { generateBoard } from '#/game/board'
 import { randomSeed } from '#/game/rng'
+import { isRobberRoll, rollDice, type DiceRoll } from '#/game/dice'
 import { RESOURCE_LABELS, TERRAIN_INFO, TERRAIN_COUNTS } from '#/game/terrain'
 
 export const Route = createFileRoute('/game')({ component: GamePage })
 
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0')
+
+/** Pip grid for the HUD dice (col, row in a 3×3 layout). */
+const PIPS: Record<number, [number, number][]> = {
+  1: [[1, 1]],
+  2: [[0, 0], [2, 2]],
+  3: [[0, 0], [1, 1], [2, 2]],
+  4: [[0, 0], [2, 0], [0, 2], [2, 2]],
+  5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]],
+  6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]],
+}
+
+function DieFace({ v }: { v: number }) {
+  return (
+    <span className="die-face" role="img" aria-label={`die showing ${v}`}>
+      {PIPS[v].map(([c, r], i) => (
+        <i key={i} style={{ left: `${15 + c * 35}%`, top: `${15 + r * 35}%` }} />
+      ))}
+    </span>
+  )
+}
 
 function GamePage() {
   const [seed, setSeed] = useState(() => randomSeed())
@@ -30,14 +51,43 @@ function GamePage() {
     edges: new Map(),
   }))
 
+  // dice + robber state
+  const [roll, setRoll] = useState<RollTrigger | null>(null)
+  const [rolling, setRolling] = useState(false)
+  const [diceResult, setDiceResult] = useState<DiceRoll | null>(null)
+  const [history, setHistory] = useState<number[]>([])
+  const [robberTileId, setRobberTileId] = useState(board.desertTileId)
+  const [robberPending, setRobberPending] = useState(false)
+  const [robberNote, setRobberNote] = useState<string | null>(null)
+  const rollRef = useRef<RollTrigger | null>(null)
+  rollRef.current = roll
+
+  // new island → robber returns to its desert
+  useEffect(() => {
+    setRobberTileId(board.desertTileId)
+  }, [board])
+
   const newBoard = () => {
     setSeed(randomSeed())
     setPlacements({ vertices: new Map(), edges: new Map() })
     setKind(null)
+    setRoll(null)
+    setRolling(false)
+    setDiceResult(null)
+    setHistory([])
+    setRobberPending(false)
+    setRobberNote(null)
   }
 
   const onPick = useCallback(
     (target: PickTarget) => {
+      if (target.kind === 'tile') {
+        // robber destination click (M6: move only — steal/discard flow lands in M8)
+        setRobberTileId(target.id)
+        setRobberPending(false)
+        setRobberNote('Robber moved — discard-half & steal flow lands in M8.')
+        return
+      }
       setPlacements((prev) => {
         const vertices = new Map(prev.vertices)
         const edges = new Map(prev.edges)
@@ -54,9 +104,29 @@ function GamePage() {
     [player],
   )
 
+  const doRoll = useCallback(() => {
+    if (rolling || robberPending) return
+    const result = rollDice()
+    setRoll({ ...result, nonce: (rollRef.current?.nonce ?? 0) + 1 })
+    setRolling(true)
+    setRobberNote(null)
+  }, [rolling, robberPending])
+
+  const onRollDone = useCallback(() => {
+    setRolling(false)
+    const r = rollRef.current
+    if (!r) return
+    setDiceResult(r)
+    setHistory((h) => [r.sum, ...h].slice(0, 10))
+    if (isRobberRoll(r.sum)) {
+      setRobberPending(true)
+      setKind(null)
+      setRobberNote('A 7! Click any hex to move the robber.')
+    }
+  }, [])
+
   const onHover = useCallback((info: HoverInfo | null) => setHover(info), [])
   const mode = useMemo(() => ({ kind, player }), [kind, player])
-
   const terrainCounts = useMemo(
     () =>
       TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count })),
@@ -65,7 +135,17 @@ function GamePage() {
 
   return (
     <div className="game-shell">
-      <GameCanvas board={board} mode={mode} placements={placements} onPick={onPick} onHover={onHover} />
+      <GameCanvas
+        board={board}
+        mode={mode}
+        placements={placements}
+        roll={roll}
+        robberMode={robberPending}
+        robberTileId={robberTileId}
+        onPick={onPick}
+        onHover={onHover}
+        onRollDone={onRollDone}
+      />
 
       <header className="hud hud-top">
         <Link to="/" className="hud-brand">
@@ -110,6 +190,28 @@ function GamePage() {
             ? `Click a highlighted ${kind === 'road' ? 'edge' : 'corner'} to place — click a piece again to remove it.`
             : 'Pick a piece type, then click the board. Rules enforcement lands in M9.'}
         </p>
+
+        <h3>Dice</h3>
+        <button className="btn btn-primary dice-roll-btn" onClick={doRoll} disabled={rolling || robberPending}>
+          {rolling ? 'Rolling…' : robberPending ? 'Move the robber first' : '🎲 Roll dice'}
+        </button>
+        {diceResult && !rolling && (
+          <div className="dice-result">
+            <DieFace v={diceResult.die1} />
+            <DieFace v={diceResult.die2} />
+            <span className={`dice-sum ${isRobberRoll(diceResult.sum) ? 'red' : ''}`}>{diceResult.sum}</span>
+          </div>
+        )}
+        {robberNote && <p className={`robber-note ${robberPending ? 'robber-note-active' : ''}`}>🥷 {robberNote}</p>}
+        {history.length > 0 && (
+          <div className="roll-history" aria-label="recent rolls">
+            {history.map((sum, i) => (
+              <span key={i} className={`roll-chip ${isRobberRoll(sum) ? 'seven' : ''}`}>
+                {sum}
+              </span>
+            ))}
+          </div>
+        )}
 
         <h3>Island</h3>
         <ul className="legend">
