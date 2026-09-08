@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { GameCanvas, type RollTrigger } from '#/components/GameCanvas'
+import { GameCanvas, type ProductionReport, type RollTrigger } from '#/components/GameCanvas'
 import {
   PLAYER_COLORS,
   PLAYER_COUNT,
@@ -13,7 +13,16 @@ import {
 import { generateBoard } from '#/game/board'
 import { randomSeed } from '#/game/rng'
 import { isRobberRoll, rollDice, type DiceRoll } from '#/game/dice'
-import { RESOURCE_LABELS, TERRAIN_INFO, TERRAIN_COUNTS } from '#/game/terrain'
+import { BANK_START, computeProduction } from '#/game/production'
+import {
+  RESOURCE_ICONS,
+  RESOURCE_LABELS,
+  RESOURCES,
+  TERRAIN_INFO,
+  TERRAIN_COUNTS,
+  emptyResourceCounts,
+  type ResourceCounts,
+} from '#/game/terrain'
 
 export const Route = createFileRoute('/game')({ component: GamePage })
 
@@ -39,6 +48,16 @@ function DieFace({ v }: { v: number }) {
   )
 }
 
+function addCounts(a: ResourceCounts, b: ResourceCounts): ResourceCounts {
+  return {
+    wood: a.wood + b.wood,
+    brick: a.brick + b.brick,
+    grain: a.grain + b.grain,
+    wool: a.wool + b.wool,
+    ore: a.ore + b.ore,
+  }
+}
+
 function GamePage() {
   const [seed, setSeed] = useState(() => randomSeed())
   const board = useMemo(() => generateBoard(seed), [seed])
@@ -62,6 +81,18 @@ function GamePage() {
   const rollRef = useRef<RollTrigger | null>(null)
   rollRef.current = roll
 
+  // production state (M7): player hands, bank stock, last payout report
+  const [hands, setHands] = useState<ResourceCounts[]>(() =>
+    Array.from({ length: PLAYER_COUNT }, emptyResourceCounts),
+  )
+  const [bank, setBank] = useState<ResourceCounts>(() => ({ ...BANK_START }))
+  const [production, setProduction] = useState<ProductionReport | null>(null)
+  const productionRef = useRef<ProductionReport | null>(null)
+  productionRef.current = production
+  const [shortages, setShortages] = useState<string[]>([])
+  // inputs frozen at throw time so mid-animation edits can't change the payout
+  const throwInputsRef = useRef<{ robberTileId: string; bank: ResourceCounts; vertices: Map<string, { player: number; type: 'settlement' | 'city' }> } | null>(null)
+
   // new island → robber returns to its desert
   useEffect(() => {
     setRobberTileId(board.desertTileId)
@@ -77,6 +108,10 @@ function GamePage() {
     setHistory([])
     setRobberPending(false)
     setRobberNote(null)
+    setHands(Array.from({ length: PLAYER_COUNT }, emptyResourceCounts))
+    setBank({ ...BANK_START })
+    setProduction(null)
+    setShortages([])
   }
 
   const onPick = useCallback(
@@ -107,10 +142,16 @@ function GamePage() {
   const doRoll = useCallback(() => {
     if (rolling || robberPending) return
     const result = rollDice()
+    // snapshot inputs at throw time: dice decide, later edits don't matter
+    throwInputsRef.current = {
+      robberTileId,
+      bank,
+      vertices: new Map(placements.vertices),
+    }
     setRoll({ ...result, nonce: (rollRef.current?.nonce ?? 0) + 1 })
     setRolling(true)
     setRobberNote(null)
-  }, [rolling, robberPending])
+  }, [rolling, robberPending, robberTileId, bank, placements])
 
   const onRollDone = useCallback(() => {
     setRolling(false)
@@ -122,8 +163,25 @@ function GamePage() {
       setRobberPending(true)
       setKind(null)
       setRobberNote('A 7! Click any hex to move the robber.')
+      setProduction(null)
+      setShortages([])
+      return
     }
-  }, [])
+    // production from the frozen throw-time inputs
+    const inputs = throwInputsRef.current
+    const result = computeProduction(
+      board,
+      inputs?.vertices ?? placements.vertices,
+      inputs?.robberTileId ?? robberTileId,
+      r.sum,
+      inputs?.bank ?? bank,
+      PLAYER_COUNT,
+    )
+    setHands((prev) => prev.map((hand, i) => addCounts(hand, result.gains[i])))
+    setBank(result.bank)
+    setShortages(result.shortages)
+    setProduction({ gains: result.gains, tileIds: result.producingTileIds, nonce: (productionRef.current?.nonce ?? 0) + 1 })
+  }, [board, placements, robberTileId, bank])
 
   const onHover = useCallback((info: HoverInfo | null) => setHover(info), [])
   const mode = useMemo(() => ({ kind, player }), [kind, player])
@@ -142,6 +200,7 @@ function GamePage() {
         roll={roll}
         robberMode={robberPending}
         robberTileId={robberTileId}
+        production={production}
         onPick={onPick}
         onHover={onHover}
         onRollDone={onRollDone}
@@ -203,6 +262,31 @@ function GamePage() {
           </div>
         )}
         {robberNote && <p className={`robber-note ${robberPending ? 'robber-note-active' : ''}`}>🥷 {robberNote}</p>}
+        {production && !rolling && (
+          <div className="production">
+            {production.gains.some((g) => RESOURCES.some((r) => g[r] > 0)) ? (
+              production.gains.map((g, i) =>
+                RESOURCES.some((r) => g[r] > 0) ? (
+                  <div key={i} className="prod-row">
+                    <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
+                    {RESOURCES.filter((r) => g[r] > 0).map((r) => (
+                      <span key={r} className="prod-item">
+                        {RESOURCE_ICONS[r]}+{g[r]}
+                      </span>
+                    ))}
+                  </div>
+                ) : null,
+              )
+            ) : (
+              <p className="muted small">Nothing produced.</p>
+            )}
+            {shortages.length > 0 && (
+              <p className="shortage-note">
+                ⚠ bank exhausted: {shortages.map((s) => RESOURCE_LABELS[s as keyof typeof RESOURCE_LABELS]).join(', ')}
+              </p>
+            )}
+          </div>
+        )}
         {history.length > 0 && (
           <div className="roll-history" aria-label="recent rolls">
             {history.map((sum, i) => (
@@ -212,6 +296,33 @@ function GamePage() {
             ))}
           </div>
         )}
+
+        <h3>Hands</h3>
+        <div className="hands">
+          {hands.map((hand, i) => (
+            <div key={i} className={`hand-row ${i === player ? 'hand-row-active' : ''}`}>
+              <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
+              <span className="hand-name">{PLAYER_NAMES[i]}</span>
+              <span className="hand-res">
+                {RESOURCES.map((r) => (
+                  <span key={r} className={hand[r] > 0 ? '' : 'muted'}>
+                    {RESOURCE_ICONS[r]}
+                    {hand[r]}
+                  </span>
+                ))}
+              </span>
+            </div>
+          ))}
+        </div>
+        <p className="muted small bank-line">
+          Bank:{' '}
+          {RESOURCES.map((r) => (
+            <span key={r}>
+              {RESOURCE_ICONS[r]}
+              {bank[r]}
+            </span>
+          ))}
+        </p>
 
         <h3>Island</h3>
         <ul className="legend">

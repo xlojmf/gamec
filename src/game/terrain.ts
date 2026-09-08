@@ -44,3 +44,23 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   wool: 'Wool',
   ore: 'Ore',
 }
+
+/** Compact HUD icons per resource (GPT Astra A3 will replace with art). */
+export const RESOURCE_ICONS: Record<Resource, string> = {
+  wood: '🪵',
+  brick: '🧱',
+  grain: '🌾',
+  wool: '🐑',
+  ore: '⛏',
+}
+
+/** A hand / bank / payout of resources. */
+export type ResourceCounts = Record<Resource, number>
+
+export function emptyResourceCounts(): ResourceCounts {
+  return { wood: 0, brick: 0, grain: 0, wool: 0, ore: 0 }
+}
+
+export function totalCards(counts: ResourceCounts): number {
+  return RESOURCES.reduce((n, r) => n + counts[r], 0)
+}

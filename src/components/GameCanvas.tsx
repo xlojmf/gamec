@@ -8,9 +8,16 @@ import {
 } from '../three/GameView'
 import type { Board } from '../game/board'
 import type { DiceRoll } from '../game/dice'
+import type { ResourceCounts } from '../game/terrain'
 
 export interface RollTrigger extends DiceRoll {
   /** Bumped every throw so repeated identical results still re-trigger. */
+  nonce: number
+}
+
+export interface ProductionReport {
+  gains: ResourceCounts[]
+  tileIds: string[]
   nonce: number
 }
 
@@ -21,6 +28,7 @@ interface GameCanvasProps {
   roll: RollTrigger | null
   robberMode: boolean
   robberTileId: string
+  production: ProductionReport | null
   onPick: (target: PickTarget) => void
   onHover: (info: HoverInfo | null) => void
   onRollDone: () => void
@@ -37,6 +45,7 @@ export function GameCanvas({
   roll,
   robberMode,
   robberTileId,
+  production,
   onPick,
   onHover,
   onRollDone,
@@ -81,6 +90,10 @@ export function GameCanvas({
   useEffect(() => {
     viewRef.current?.setRobberTile(robberTileId)
   }, [robberTileId])
+
+  useEffect(() => {
+    if (production) viewRef.current?.showProduction(production.tileIds)
+  }, [production])
 
   return <div ref={hostRef} className="game-canvas" />
 }

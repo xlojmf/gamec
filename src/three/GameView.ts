@@ -286,6 +286,7 @@ export class GameView {
   private robberMode = false
   private robberTileMeshes = new Map<string, THREE.Mesh>()
   private hoveredRobberTile: THREE.Mesh | null = null
+  private productionPulses: { mesh: THREE.Mesh; t: number }[] = []
 
   // public callbacks
   onPick: ((target: PickTarget) => void) | null = null
@@ -479,6 +480,23 @@ export class GameView {
       this.container.style.cursor = 'default'
     }
     this.refreshRobberTiles()
+  }
+
+  /** Flash a green pulse over tiles that just produced. */
+  showProduction(tileIds: string[]) {
+    if (!this.board) return
+    for (const id of tileIds) {
+      const tile = this.board.tileById.get(id)
+      if (!tile) continue
+      const mesh = new THREE.Mesh(
+        robberTileGeometry,
+        new THREE.MeshBasicMaterial({ color: 0x8fd98f, transparent: true, opacity: 0, depthWrite: false }),
+      )
+      mesh.rotation.y = Math.PI / 6
+      mesh.position.set(tile.x, TILE_TOP + 0.032, tile.z)
+      this.boardGroup.add(mesh)
+      this.productionPulses.push({ mesh, t: 0 })
+    }
   }
 
   dispose() {
@@ -1001,11 +1019,22 @@ export class GameView {
     if (this.robberTilesGroup.visible) {
       const base = ROBBER_TILE_BASE_OPACITY + 0.05 + 0.05 * Math.sin(t * 5)
       for (const mesh of this.robberTileMeshes.values()) {
-        if (mesh !== this.hoveredRobberTile) {
-          ;(mesh.material as THREE.MeshBasicMaterial).opacity = base
-        } else {
-          ;(mesh.material as THREE.MeshBasicMaterial).opacity = 0.5
-        }
+        ;(mesh.material as THREE.MeshBasicMaterial).opacity = mesh === this.hoveredRobberTile ? 0.5 : base
+      }
+    }
+
+    // production pulses: rise & fall once, then remove
+    for (let i = this.productionPulses.length - 1; i >= 0; i--) {
+      const p = this.productionPulses[i]
+      p.t += dt
+      const u = p.t / 1.4
+      if (u >= 1) {
+        p.mesh.removeFromParent()
+        ;(p.mesh.material as THREE.Material).dispose()
+        this.productionPulses.splice(i, 1)
+      } else {
+        ;(p.mesh.material as THREE.MeshBasicMaterial).opacity = Math.sin(Math.PI * u) * 0.5
+        p.mesh.scale.setScalar(1 + 0.06 * Math.sin(Math.PI * u))
       }
     }
   }

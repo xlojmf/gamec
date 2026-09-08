@@ -445,6 +445,65 @@ code {
   font-weight: 700;
 }
 
+/* --- production & hands ------------------------------------------------------ */
+
+.production {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.prod-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+}
+.prod-item {
+  font-variant-numeric: tabular-nums;
+}
+.shortage-note {
+  margin: 0.2rem 0 0;
+  font-size: 0.75rem;
+  color: #e8b46a;
+}
+
+.hands {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.hand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3em 0.5em;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 0.85rem;
+}
+.hand-row-active {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.06);
+}
+.hand-name {
+  min-width: 3.2em;
+}
+.hand-res {
+  display: flex;
+  gap: 0.45em;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+.hand-res .muted {
+  opacity: 0.45;
+}
+.bank-line {
+  display: flex;
+  gap: 0.5em;
+  font-variant-numeric: tabular-nums;
+}
+
 .legend {
   list-style: none;
   margin: 0;
