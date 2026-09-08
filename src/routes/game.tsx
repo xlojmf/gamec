@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createFileRoute, Link } from '@tanstack/react-router'
+import { Client } from 'boardgame.io/client'
 import { GameCanvas, type ProductionReport, type RollTrigger } from '#/components/GameCanvas'
 import {
   PLAYER_COLORS,
@@ -12,15 +13,21 @@ import {
 } from '#/three/GameView'
 import { generateBoard } from '#/game/board'
 import { randomSeed } from '#/game/rng'
-import { isRobberRoll, rollDice, type DiceRoll } from '#/game/dice'
-import { BANK_START, computeProduction } from '#/game/production'
+import { isRobberRoll, type DiceRoll } from '#/game/dice'
+import {
+  createCatanGame,
+  validSetupEdges,
+  validSetupVertices,
+  vpCounts,
+  type BgioState,
+} from '#/game/catan'
 import {
   RESOURCE_ICONS,
   RESOURCE_LABELS,
   RESOURCES,
   TERRAIN_INFO,
   TERRAIN_COUNTS,
-  emptyResourceCounts,
+  totalCards,
   type ResourceCounts,
 } from '#/game/terrain'
 
@@ -48,148 +55,221 @@ function DieFace({ v }: { v: number }) {
   )
 }
 
-function addCounts(a: ResourceCounts, b: ResourceCounts): ResourceCounts {
-  return {
-    wood: a.wood + b.wood,
-    brick: a.brick + b.brick,
-    grain: a.grain + b.grain,
-    wool: a.wool + b.wool,
-    ore: a.ore + b.ore,
-  }
+type BgioClient = ReturnType<typeof Client>
+
+/** Owns one local boardgame.io client per seed — the whole game's brain. */
+function useCatanClient(seed: number) {
+  const [state, setState] = useState<BgioState | null>(null)
+  const clientRef = useRef<BgioClient | null>(null)
+
+  useEffect(() => {
+    const client: BgioClient = Client({ game: createCatanGame(seed), numPlayers: PLAYER_COUNT })
+    client.start()
+    clientRef.current = client
+    setState(client.getState() as BgioState)
+    const unsubscribe = client.subscribe((s) => {
+      if (s) setState(s as unknown as BgioState)
+    })
+    return () => {
+      unsubscribe()
+      client.stop()
+      clientRef.current = null
+    }
+  }, [seed])
+
+  /** Dispatch a move as the given player (hotseat: we act for everyone). */
+  const move = useCallback(
+    (pid: number, fn: (moves: Record<string, (...args: unknown[]) => unknown>) => void) => {
+      const client = clientRef.current
+      if (!client) return
+      client.updatePlayerID(String(pid))
+      fn(client.moves as Record<string, (...args: unknown[]) => unknown>)
+    },
+    [],
+  )
+
+  return { state, move }
+}
+
+/** Discard-half overlay: pick exactly `required` cards. */
+function DiscardPanel({
+  player,
+  hand,
+  required,
+  onConfirm,
+}: {
+  player: number
+  hand: ResourceCounts
+  required: number
+  onConfirm: (cards: Partial<ResourceCounts>) => void
+}) {
+  const [sel, setSel] = useState<Partial<ResourceCounts>>({})
+  const total = RESOURCES.reduce((n, r) => n + (sel[r] ?? 0), 0)
+  return (
+    <div className="overlay">
+      <div className="overlay-card">
+        <h3>
+          <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[player]) } as React.CSSProperties} />{' '}
+          {PLAYER_NAMES[player]} — discard {required} card{required === 1 ? '' : 's'}
+        </h3>
+        <div className="discard-grid">
+          {RESOURCES.map((r) => (
+            <div key={r} className="discard-cell">
+              <span className="discard-label">
+                {RESOURCE_ICONS[r]} {RESOURCE_LABELS[r]} ×{hand[r]}
+              </span>
+              <div className="stepper">
+                <button
+                  className="btn btn-small"
+                  disabled={(sel[r] ?? 0) === 0}
+                  onClick={() => setSel((s) => ({ ...s, [r]: (s[r] ?? 0) - 1 }))}
+                >
+                  −
+                </button>
+                <span className="stepper-value">{sel[r] ?? 0}</span>
+                <button
+                  className="btn btn-small"
+                  disabled={(sel[r] ?? 0) >= hand[r]}
+                  onClick={() => setSel((s) => ({ ...s, [r]: (s[r] ?? 0) + 1 }))}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <button className="btn btn-primary" disabled={total !== required} onClick={() => onConfirm(sel)}>
+          Discard {total}/{required}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function GamePage() {
   const [seed, setSeed] = useState(() => randomSeed())
+  const { state, move } = useCatanClient(seed)
   const board = useMemo(() => generateBoard(seed), [seed])
 
-  const [player, setPlayer] = useState(0)
+  // local view state (animation gating, setup selection, history)
   const [kind, setKind] = useState<BuildKind>(null)
   const [hover, setHover] = useState<HoverInfo | null>(null)
-  const [placements, setPlacements] = useState<PlacementState>(() => ({
-    vertices: new Map(),
-    edges: new Map(),
-  }))
-
-  // dice + robber state
-  const [roll, setRoll] = useState<RollTrigger | null>(null)
   const [rolling, setRolling] = useState(false)
-  const [diceResult, setDiceResult] = useState<DiceRoll | null>(null)
   const [history, setHistory] = useState<number[]>([])
-  const [robberTileId, setRobberTileId] = useState(board.desertTileId)
-  const [robberPending, setRobberPending] = useState(false)
-  const [robberNote, setRobberNote] = useState<string | null>(null)
-  const rollRef = useRef<RollTrigger | null>(null)
-  rollRef.current = roll
+  const [setupVertex, setSetupVertex] = useState<string | null>(null)
 
-  // production state (M7): player hands, bank stock, last payout report
-  const [hands, setHands] = useState<ResourceCounts[]>(() =>
-    Array.from({ length: PLAYER_COUNT }, emptyResourceCounts),
+  const G = state?.G
+  const ctx = state?.ctx
+  const phase = ctx?.phase ?? 'setup'
+  const current = Number(ctx?.currentPlayer ?? 0)
+  const gameover = ctx?.gameover ?? null
+
+  // placements from authoritative state → GameCanvas maps
+  const placements = useMemo<PlacementState>(
+    () => ({
+      vertices: new Map(Object.entries(G?.buildings.vertices ?? {})),
+      edges: new Map(Object.entries(G?.buildings.edges ?? {})),
+    }),
+    [G],
   )
-  const [bank, setBank] = useState<ResourceCounts>(() => ({ ...BANK_START }))
-  const [production, setProduction] = useState<ProductionReport | null>(null)
-  const productionRef = useRef<ProductionReport | null>(null)
-  productionRef.current = production
-  const [shortages, setShortages] = useState<string[]>([])
-  // inputs frozen at throw time so mid-animation edits can't change the payout
-  const throwInputsRef = useRef<{ robberTileId: string; bank: ResourceCounts; vertices: Map<string, { player: number; type: 'settlement' | 'city' }> } | null>(null)
+  const rollTrigger = useMemo<RollTrigger | null>(
+    () => (G?.lastRoll ? { ...G.lastRoll } : null),
+    [G?.lastRoll],
+  )
+  const productionReport = useMemo<ProductionReport | null>(
+    () => (G?.lastProduction ? { gains: G.lastProduction.gains, tileIds: G.lastProduction.tileIds, nonce: G.lastProduction.nonce } : null),
+    [G?.lastProduction],
+  )
 
-  // new island → robber returns to its desert
+  // roll history follows engine rolls
+  const lastNonce = useRef<number | null>(null)
   useEffect(() => {
-    setRobberTileId(board.desertTileId)
-  }, [board])
+    const lr = G?.lastRoll
+    if (lr && lr.nonce !== lastNonce.current) {
+      lastNonce.current = lr.nonce
+      setHistory((h) => [lr.sum, ...h].slice(0, 10))
+    }
+  }, [G?.lastRoll])
 
-  const newBoard = () => {
+  const onRollDone = useCallback(() => setRolling(false), [])
+
+  const newGame = () => {
     setSeed(randomSeed())
-    setPlacements({ vertices: new Map(), edges: new Map() })
     setKind(null)
-    setRoll(null)
     setRolling(false)
-    setDiceResult(null)
     setHistory([])
-    setRobberPending(false)
-    setRobberNote(null)
-    setHands(Array.from({ length: PLAYER_COUNT }, emptyResourceCounts))
-    setBank({ ...BANK_START })
-    setProduction(null)
-    setShortages([])
+    setSetupVertex(null)
+    lastNonce.current = null
   }
+
+  // -- interaction ---------------------------------------------------------------
 
   const onPick = useCallback(
     (target: PickTarget) => {
+      if (!G || !ctx) return
       if (target.kind === 'tile') {
-        // robber destination click (M6: move only — steal/discard flow lands in M8)
-        setRobberTileId(target.id)
-        setRobberPending(false)
-        setRobberNote('Robber moved — discard-half & steal flow lands in M8.')
+        if (G.robberStep === 'move') move(current, (m) => m.moveRobber(target.id))
         return
       }
-      setPlacements((prev) => {
-        const vertices = new Map(prev.vertices)
-        const edges = new Map(prev.edges)
+      if (phase === 'setup') {
         if (target.kind === 'vertex') {
-          if (vertices.has(target.id)) vertices.delete(target.id) // click again to remove (sandbox)
-          else vertices.set(target.id, { player, type: 'settlement' })
-        } else {
-          if (edges.has(target.id)) edges.delete(target.id)
-          else edges.set(target.id, { player })
+          if (validSetupVertices(G).includes(target.id)) setSetupVertex(target.id)
+        } else if (setupVertex && validSetupEdges(G, setupVertex).includes(target.id)) {
+          move(current, (m) => m.placeSetup(setupVertex, target.id))
+          setSetupVertex(null)
         }
-        return { vertices, edges }
-      })
+        return
+      }
+      // main phase: build as the active player (costs land in M9)
+      if (phase === 'main' && G.rolled && !G.robberStep) {
+        if (target.kind === 'vertex' && kind === 'settlement') move(current, (m) => m.placeSettlement(target.id))
+        if (target.kind === 'edge' && kind === 'road') move(current, (m) => m.placeRoad(target.id))
+      }
     },
-    [player],
+    [G, ctx, phase, current, setupVertex, kind, move],
   )
-
-  const doRoll = useCallback(() => {
-    if (rolling || robberPending) return
-    const result = rollDice()
-    // snapshot inputs at throw time: dice decide, later edits don't matter
-    throwInputsRef.current = {
-      robberTileId,
-      bank,
-      vertices: new Map(placements.vertices),
-    }
-    setRoll({ ...result, nonce: (rollRef.current?.nonce ?? 0) + 1 })
-    setRolling(true)
-    setRobberNote(null)
-  }, [rolling, robberPending, robberTileId, bank, placements])
-
-  const onRollDone = useCallback(() => {
-    setRolling(false)
-    const r = rollRef.current
-    if (!r) return
-    setDiceResult(r)
-    setHistory((h) => [r.sum, ...h].slice(0, 10))
-    if (isRobberRoll(r.sum)) {
-      setRobberPending(true)
-      setKind(null)
-      setRobberNote('A 7! Click any hex to move the robber.')
-      setProduction(null)
-      setShortages([])
-      return
-    }
-    // production from the frozen throw-time inputs
-    const inputs = throwInputsRef.current
-    const result = computeProduction(
-      board,
-      inputs?.vertices ?? placements.vertices,
-      inputs?.robberTileId ?? robberTileId,
-      r.sum,
-      inputs?.bank ?? bank,
-      PLAYER_COUNT,
-    )
-    setHands((prev) => prev.map((hand, i) => addCounts(hand, result.gains[i])))
-    setBank(result.bank)
-    setShortages(result.shortages)
-    setProduction({ gains: result.gains, tileIds: result.producingTileIds, nonce: (productionRef.current?.nonce ?? 0) + 1 })
-  }, [board, placements, robberTileId, bank])
 
   const onHover = useCallback((info: HoverInfo | null) => setHover(info), [])
-  const mode = useMemo(() => ({ kind, player }), [kind, player])
-  const terrainCounts = useMemo(
-    () =>
-      TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count })),
-    [],
-  )
+
+  const doRoll = () => {
+    if (!G || phase !== 'main' || G.rolled || G.robberStep || rolling) return
+    setRolling(true)
+    move(current, (m) => m.roll())
+  }
+
+  // build mode shown to GameCanvas
+  const mode = useMemo(() => {
+    if (phase === 'setup') {
+      return setupVertex
+        ? { kind: 'road' as BuildKind, player: current }
+        : { kind: 'settlement' as BuildKind, player: current }
+    }
+    return { kind: G?.robberStep ? null : kind, player: current }
+  }, [phase, setupVertex, current, kind, G?.robberStep])
+
+  if (!G || !ctx) return <div className="game-shell" />
+
+  const robberMode = G.robberStep === 'move'
+  const canBuild = phase === 'main' && G.rolled && !G.robberStep
+  const discardPid = G.robberStep === 'discard' ? Number(Object.keys(G.pendingDiscards)[0]) : null
+  const diceResult: DiceRoll | null = G.lastRoll
+  const vps = vpCounts(G)
+
+  const turnBanner = gameover
+    ? `${PLAYER_NAMES[gameover.winner]} wins!`
+    : phase === 'setup'
+      ? `${PLAYER_NAMES[current]} — place settlement${setupVertex ? ' ✓' : ''} + road${setupVertex ? '' : ' (settlement first)'}`
+      : G.robberStep === 'discard'
+        ? 'Robber! Players discard half their hand'
+        : G.robberStep === 'move'
+          ? `${PLAYER_NAMES[current]} — move the robber`
+          : G.robberStep === 'steal'
+            ? `${PLAYER_NAMES[current]} — choose a victim to rob`
+            : !G.rolled
+              ? `${PLAYER_NAMES[current]} — roll the dice`
+              : `${PLAYER_NAMES[current]} — trade & build`
+
+  const terrainCounts = useMemo(() => TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count })), [])
 
   return (
     <div className="game-shell">
@@ -197,10 +277,10 @@ function GamePage() {
         board={board}
         mode={mode}
         placements={placements}
-        roll={roll}
-        robberMode={robberPending}
-        robberTileId={robberTileId}
-        production={production}
+        roll={rollTrigger}
+        robberMode={robberMode}
+        robberTileId={G.robberTileId}
+        production={productionReport}
         onPick={onPick}
         onHover={onHover}
         onRollDone={onRollDone}
@@ -211,96 +291,61 @@ function GamePage() {
           ⟵ <span>Catan 3D</span>
         </Link>
         <span className="hud-seed">island #{seed.toString(36)}</span>
-        <button className="btn btn-small" onClick={newBoard}>
-          ↻ New island
+        <button className="btn btn-small" onClick={newGame}>
+          ↻ New game
         </button>
       </header>
 
+      <div className={`turn-banner ${gameover ? 'turn-banner-win' : ''}`}>
+        <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[current]) } as React.CSSProperties} />
+        {turnBanner}
+      </div>
+
       <aside className="hud hud-panel">
-        <h3>Builder</h3>
-        <div className="player-row">
-          {Array.from({ length: PLAYER_COUNT }, (_, i) => (
+        {phase === 'main' && (
+          <>
+            <h3>Dice</h3>
             <button
-              key={i}
-              className={`chip ${i === player ? 'chip-active' : ''}`}
-              style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties}
-              onClick={() => setPlayer(i)}
-              title={PLAYER_NAMES[i]}
+              className="btn btn-primary dice-roll-btn"
+              onClick={doRoll}
+              disabled={G.rolled || !!G.robberStep || rolling || !!gameover}
             >
-              <span className="chip-dot" />
-              {PLAYER_NAMES[i]}
+              {rolling ? 'Rolling…' : G.robberStep === 'move' ? 'Move the robber first' : '🎲 Roll dice'}
             </button>
-          ))}
-        </div>
-
-        <div className="build-row">
-          <button className={`btn ${kind === 'road' ? 'btn-active' : ''}`} onClick={() => setKind(kind === 'road' ? null : 'road')}>
-            🛣 Road
-          </button>
-          <button
-            className={`btn ${kind === 'settlement' ? 'btn-active' : ''}`}
-            onClick={() => setKind(kind === 'settlement' ? null : 'settlement')}
-          >
-            🏠 Settlement
-          </button>
-        </div>
-        <p className="muted small">
-          {kind
-            ? `Click a highlighted ${kind === 'road' ? 'edge' : 'corner'} to place — click a piece again to remove it.`
-            : 'Pick a piece type, then click the board. Rules enforcement lands in M9.'}
-        </p>
-
-        <h3>Dice</h3>
-        <button className="btn btn-primary dice-roll-btn" onClick={doRoll} disabled={rolling || robberPending}>
-          {rolling ? 'Rolling…' : robberPending ? 'Move the robber first' : '🎲 Roll dice'}
-        </button>
-        {diceResult && !rolling && (
-          <div className="dice-result">
-            <DieFace v={diceResult.die1} />
-            <DieFace v={diceResult.die2} />
-            <span className={`dice-sum ${isRobberRoll(diceResult.sum) ? 'red' : ''}`}>{diceResult.sum}</span>
-          </div>
-        )}
-        {robberNote && <p className={`robber-note ${robberPending ? 'robber-note-active' : ''}`}>🥷 {robberNote}</p>}
-        {production && !rolling && (
-          <div className="production">
-            {production.gains.some((g) => RESOURCES.some((r) => g[r] > 0)) ? (
-              production.gains.map((g, i) =>
-                RESOURCES.some((r) => g[r] > 0) ? (
-                  <div key={i} className="prod-row">
-                    <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
-                    {RESOURCES.filter((r) => g[r] > 0).map((r) => (
-                      <span key={r} className="prod-item">
-                        {RESOURCE_ICONS[r]}+{g[r]}
-                      </span>
-                    ))}
-                  </div>
-                ) : null,
-              )
-            ) : (
-              <p className="muted small">Nothing produced.</p>
+            {diceResult && !rolling && (
+              <div className="dice-result">
+                <DieFace v={diceResult.die1} />
+                <DieFace v={diceResult.die2} />
+                <span className={`dice-sum ${isRobberRoll(diceResult.sum) ? 'red' : ''}`}>{diceResult.sum}</span>
+              </div>
             )}
-            {shortages.length > 0 && (
-              <p className="shortage-note">
-                ⚠ bank exhausted: {shortages.map((s) => RESOURCE_LABELS[s as keyof typeof RESOURCE_LABELS]).join(', ')}
-              </p>
+            {G.robberStep === 'steal' && (
+              <div className="steal-picker">
+                <p className="small">Steal 1 random card from:</p>
+                {G.stealTargets!.map((v) => (
+                  <button key={v} className="chip" style={{ '--chip': hex(PLAYER_COLORS[v]) } as React.CSSProperties} onClick={() => move(current, (m) => m.steal(v))}>
+                    <span className="chip-dot" />
+                    {PLAYER_NAMES[v]} ({totalCards(G.hands[v])} cards)
+                  </button>
+                ))}
+              </div>
             )}
-          </div>
-        )}
-        {history.length > 0 && (
-          <div className="roll-history" aria-label="recent rolls">
-            {history.map((sum, i) => (
-              <span key={i} className={`roll-chip ${isRobberRoll(sum) ? 'seven' : ''}`}>
-                {sum}
-              </span>
-            ))}
-          </div>
+            {history.length > 0 && (
+              <div className="roll-history" aria-label="recent rolls">
+                {history.map((sum, i) => (
+                  <span key={i} className={`roll-chip ${isRobberRoll(sum) ? 'seven' : ''}`}>
+                    {sum}
+                  </span>
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         <h3>Hands</h3>
         <div className="hands">
-          {hands.map((hand, i) => (
-            <div key={i} className={`hand-row ${i === player ? 'hand-row-active' : ''}`}>
+          {G.hands.map((hand, i) => (
+            <div key={i} className={`hand-row ${i === current && phase !== 'setup' ? 'hand-row-active' : ''}`}>
               <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
               <span className="hand-name">{PLAYER_NAMES[i]}</span>
               <span className="hand-res">
@@ -311,6 +356,9 @@ function GamePage() {
                   </span>
                 ))}
               </span>
+              <span className="hand-vp" title="victory points">
+                {vps[i]} VP
+              </span>
             </div>
           ))}
         </div>
@@ -319,10 +367,49 @@ function GamePage() {
           {RESOURCES.map((r) => (
             <span key={r}>
               {RESOURCE_ICONS[r]}
-              {bank[r]}
+              {G.bank[r]}
             </span>
           ))}
         </p>
+
+        {phase === 'main' && (
+          <>
+            <h3>Build</h3>
+            <div className="build-row">
+              <button
+                className={`btn ${kind === 'road' ? 'btn-active' : ''}`}
+                disabled={!canBuild}
+                onClick={() => setKind(kind === 'road' ? null : 'road')}
+              >
+                🛣 Road
+              </button>
+              <button
+                className={`btn ${kind === 'settlement' ? 'btn-active' : ''}`}
+                disabled={!canBuild}
+                onClick={() => setKind(kind === 'settlement' ? null : 'settlement')}
+              >
+                🏠 Settlement
+              </button>
+            </div>
+            <button className="btn end-turn-btn" disabled={!canBuild} onClick={() => move(current, (m) => m.endTurn())}>
+              End turn ⟶
+            </button>
+            <p className="muted small">
+              {canBuild
+                ? 'Build freely for now — costs & legality checks land in M9.'
+                : 'Roll the dice first; build afterwards.'}
+            </p>
+          </>
+        )}
+
+        <h3>Log</h3>
+        <ul className="log">
+          {G.log.slice(0, 7).map((line, i) => (
+            <li key={i} className={i === 0 ? 'log-latest' : ''}>
+              {line}
+            </li>
+          ))}
+        </ul>
 
         <h3>Island</h3>
         <ul className="legend">
@@ -334,11 +421,6 @@ function GamePage() {
             </li>
           ))}
         </ul>
-
-        <h3>Placed</h3>
-        <p className="muted small">
-          {[...placements.vertices.values()].length} settlements · {[...placements.edges.values()].length} roads
-        </p>
 
         {hover && (
           <>
@@ -358,7 +440,33 @@ function GamePage() {
         )}
       </aside>
 
-      <footer className="hud hud-bottom">drag · rotate &nbsp;|&nbsp; scroll · zoom &nbsp;|&nbsp; right-drag · pan</footer>
+      <footer className="hud hud-bottom">
+        {phase === 'setup' ? 'click a glowing corner → then a touching road slot' : 'drag · rotate | scroll · zoom | right-drag · pan'}
+      </footer>
+
+      {discardPid !== null && (
+        <DiscardPanel
+          key={discardPid}
+          player={discardPid}
+          hand={G.hands[discardPid]}
+          required={G.pendingDiscards[discardPid]}
+          onConfirm={(cards) => move(discardPid, (m) => m.discardHalf(cards))}
+        />
+      )}
+
+      {gameover && (
+        <div className="overlay">
+          <div className="overlay-card overlay-win">
+            <h2>
+              <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[gameover.winner]) } as React.CSSProperties} />{' '}
+              {PLAYER_NAMES[gameover.winner]} wins with {vps[gameover.winner]} VP!
+            </h2>
+            <button className="btn btn-primary" onClick={newGame}>
+              Play again
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -207,8 +207,8 @@ Mapped 1:1 to the incremental build plan. Each milestone ships green (typecheck 
 | M5 | Camera controls | OrbitControls (rotate/pan/zoom, limits, damping), intro fly-in, resize | Smooth camera; no clipping through board; resize safe | ✅ |
 | M6 | Dice | Roll UI with 3D dice throw feel, sum display, 7 → robber mode | Roll animates; 7 flow begins (robber move/steal UI completes in M8) | ✅ |
 | M7 | Resource production | Yield calculation from board state, player hands, bank limits | Correct yields for settlements/cities; robber blocks; stack exhaustion | ✅ |
-| M8 | Player turns | boardgame.io local client; setup snake draft; turn phases; robber resolution; discard flow | Full hotseat game runs from setup to 10 VP with rules above | ⏳ next |
-| M9 | Building rules | Costs, supply limits, connectivity, distance rule, road-cutting | Illegal builds impossible; costs exact per §5.7 | ⏳ |
+| M8 | Player turns | boardgame.io local client; setup snake draft; turn phases; robber resolution; discard flow | Full hotseat game runs from setup to 10 VP with rules above | ✅ |
+| M9 | Building rules | Costs, supply limits, connectivity, distance rule, road-cutting | Illegal builds impossible; costs exact per §5.7 | ⏳ next |
 | M10 | Trading | Bank 4:1, ports 3:1 & 2:1, player-to-player trade offers | Trades validated per §5.3.2 | ⏳ |
 | M11 | Development cards | Deck, play restrictions, Largest Army / Longest Road, VP win check | Dev cards fully functional; awards transfer correctly | ⏳ |
 | M12 | Multiplayer | boardgame.io server in compose, lobby/join codes, hidden hands, reconnect | 2+ browsers play one authoritative game; refresh reconnects | ⏳ |

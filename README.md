@@ -56,8 +56,8 @@ src/
 | M5 | Camera controls | ✅ |
 | M6 | Dice | ✅ |
 | M7 | Resource production | ✅ |
-| M8 | Player turns (boardgame.io local) | ⏳ next |
-| M9 | Building rules | ⏳ |
+| M8 | Player turns (boardgame.io local) | ✅ |
+| M9 | Building rules | ⏳ next |
 | M10 | Trading | ⏳ |
 | M11 | Development cards | ⏳ |
 | M12 | Multiplayer (boardgame.io server) | ⏳ |
@@ -65,11 +65,12 @@ src/
 
 Details and acceptance criteria per milestone: [`PRD.md §6`](./PRD.md).
 
-## Playing today (M7 sandbox)
+## Playing today (M8 hotseat game)
 
-- Drag to rotate, scroll to zoom, right-drag to pan.
-- Pick a player color, choose **Road** or **Settlement**, click a highlighted edge/corner to place; click a placed piece again to remove it.
-- Hover hexes to inspect terrain, resource and number token.
-- **Roll dice** throws two animated 3D dice onto the ocean; producing hexes pulse green and the HUD shows each player's haul — hands and the 19-card bank stacks update live.
-- A 7 enters robber mode — click any hex to move him (steal/discard flow lands in M8); his hex produces nothing.
-- **New island** regenerates the board from a fresh seed (free placement — rule enforcement arrives in M9).
+- **Setup**: snake draft — each player places a settlement + connecting road (glowing spots), twice; second settlements pay out starting resources.
+- **Turns**: roll the animated 3D dice → producing hexes pulse green and hands update → build roads/settlements for the active player → end turn.
+- **Rolling a 7**: over-7-card hands discard half via the overlay, the active player hops the robber to any hex, then steals a random card from a chosen victim.
+- Hands, bank stacks (19 each) and a compact log live in the HUD; first player to 10 VP wins.
+- Drag to rotate, scroll to zoom, right-drag to pan; hover hexes to inspect them.
+- Build costs, connectivity & distance rules are enforced from M9 — until then placement is free after the roll.
+- **New game** reseeds the island and restarts the draft.
