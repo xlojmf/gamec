@@ -1,0 +1,10 @@
+node_modules
+dist
+server.log
+preview.log
+.git
+.vscode
+.claude
+.cta.json
+*.md
+!README.md

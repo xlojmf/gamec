@@ -1,0 +1,11 @@
+services:
+  web:
+    build: .
+    image: catan-3d
+    ports:
+      - '3000:3000'
+    restart: unless-stopped
+    # M12 adds the boardgame.io multiplayer server as a `game` service here.
+
+# Usage:
+#   docker compose up --build      → http://localhost:3000
