@@ -13,7 +13,7 @@ M0–M9 done, committed, all green (typecheck ✅ · 45/45 tests ✅ · build �
 | M6 dice (3D throw, 7→robber mode) | `76695d8` |
 | M7 resource production (hands, bank, pulses) | `af95e2e` |
 | M8 player turns (boardgame.io engine, hotseat) | `0434064` |
-| M9 building rules (costs, supply, connectivity, upgradeCity) | `3d32feb` |
+| M9 building rules (costs, supply, connectivity, upgradeCity) | `0ac2ea6` |
 
 The game currently plays: snake-draft setup → roll/produce/build turns → 7 flow (discard/move/steal) → 10 VP win — with **full building rules**: costs paid to the bank, 15/5/4 supply caps, road connectivity (opponent settlements cut junctions), distance rule, city upgrades. Ghost highlights in both setup and main phase show only *legal* spots via `BuildMode.allowedVertices/allowedEdges`.
 
