@@ -14,7 +14,7 @@ export const Route = createRootRoute({
           'A 3D browser adaptation of the classic settler’s game — Three.js, TanStack Start, boardgame.io.',
       },
     ],
-    links: [{ rel: 'stylesheet', href: appCss }],
+    links: [{ rel: 'stylesheet', href: appCss }, { rel: 'icon', href: '/favicon.svg' }],
   }),
   shellComponent: RootDocument,
 })

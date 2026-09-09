@@ -55,6 +55,9 @@ const PIPS: Record<number, [number, number][]> = {
   6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]],
 }
 
+/** Static island legend — module-level so no hook ordering can break. */
+const TERRAIN_LEGEND = TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count }))
+
 function DieFace({ v }: { v: number }) {
   return (
     <span className="die-face" role="img" aria-label={`die showing ${v}`}>
@@ -435,7 +438,7 @@ function GamePage() {
                 ? `${PLAYER_NAMES[current]} — roll the dice`
                 : `${PLAYER_NAMES[current]} — trade & build`
 
-  const terrainCounts = useMemo(() => TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count })), [])
+  const terrainCounts = TERRAIN_LEGEND
 
   return (
     <div className="game-shell">

@@ -51,6 +51,7 @@ Files to touch: `src/game/catan.ts`, new `src/game/awards.ts`, `src/game/catan.t
 - `src/game/*` = pure, no framework imports, Maps allowed *outside* bgio state; **G stays JSON-serializable** (buildings are `Record`s, never Maps). Board is regenerated from `G.seed` via `boardFor()` (cached).
 - Build validators (`validRoadEdges` / `validSettlementVertices` / `validCityVertices`) include **affordability + supply + geometry** — single source of truth for moves and UI ghost sets. Trade rate logic likewise lives in `bankTradeRate(G, player, resource)`.
 - `src/three/GameView.ts` is the only file that touches Three.js; React ↔ it via `GameCanvas` imperative props (`roll`, `production`, `robberMode`, `robberTileId` all nonce/identity-driven effects). Ghosts can be constrained per-mode via `BuildMode.allowedVertices/allowedEdges` (Sets); city ghosts float above the settlement they'd upgrade.
+- **No hooks after the `if (!G || !ctx) return` early return in `GamePage`** — the first render has `state === null`, so any hook below it changes the hook count between renders and crashes React (bit us once: a stray `useMemo` for the static island legend; static data belongs at module scope).
 - Dice/robber visuals: `rollDice()` animates then fires `onRollDone`; production pulses via `showProduction(tileIds)`; robber hop via `setRobberTile`.
 
 ## Morning checklist

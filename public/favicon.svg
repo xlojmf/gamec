@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- hex island on ocean -->
+  <rect width="32" height="32" rx="6" fill="#1c6ea4"/>
+  <polygon points="16,5 25,10 25,21 16,26 7,21 7,10" fill="#e0be58" stroke="#c9a23a" stroke-width="1"/>
+  <polygon points="16,10 20.5,12.5 20.5,18.5 16,21 11.5,18.5 11.5,12.5" fill="#94c95e"/>
+  <circle cx="16" cy="15.5" r="2" fill="#d7443e"/>
+</svg>
