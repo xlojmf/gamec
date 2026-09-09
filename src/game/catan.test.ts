@@ -55,6 +55,45 @@ function runSetup(client: ReturnType<typeof makeClient>) {
   return secondVertices
 }
 
+/**
+ * Roll (as whoever's turn it is) until a non-7 shows, resolving any robber
+ * flow on the way. Needed because bgio 0.50's local client ignores the `seed`
+ * option — rolls are genuinely random, so tests must tolerate surprise 7s.
+ */
+function rollUntilProducing(client: ReturnType<typeof makeClient>, boardSeed: number) {
+  for (let guard = 0; guard < 60; guard++) {
+    asPlayer(client, state(client).ctx.currentPlayer)
+    client.moves.roll()
+    let { G } = state(client)
+    if (!G.robberStep) return
+    if (G.robberStep === 'discard') {
+      while (Object.keys(state(client).G.pendingDiscards).length > 0) {
+        for (const [pidStr, required] of Object.entries(state(client).G.pendingDiscards)) {
+          const pid = Number(pidStr)
+          const hand = state(client).G.hands[pid]
+          const cards: Record<string, number> = {}
+          let left = required as number
+          for (const r of ['wood', 'brick', 'grain', 'wool', 'ore'] as const) {
+            const take = Math.min(left, hand[r])
+            cards[r] = take
+            left -= take
+          }
+          asPlayer(client, pid)
+          client.moves.discardHalf(cards)
+        }
+      }
+    }
+    G = state(client).G
+    const board = generateBoard(boardSeed)
+    asPlayer(client, state(client).ctx.currentPlayer) // robber moves are the mover's
+    client.moves.moveRobber(board.tiles.find((t) => t.id !== G.robberTileId)!.id)
+    const after = state(client)
+    if (after.G.robberStep === 'steal') client.moves.steal(after.G.stealTargets![0])
+    client.moves.endTurn()
+  }
+  throw new Error('never rolled a non-7 (statistically impossible)')
+}
+
 // -- integration: full flow through a real boardgame.io client -------------------
 
 describe('CatanGame setup phase', () => {
@@ -134,11 +173,11 @@ describe('CatanGame main phase', () => {
     const bankBefore = Object.values(before.bank).reduce((a, b) => a + b, 0)
     const handsBefore = before.hands.reduce((a, h) => a + totalCards(h), 0)
 
-    asPlayer(client, 0)
-    client.moves.roll()
+    rollUntilProducing(client, 11) // skips (and conserves through) any random 7s
     const after = state(client).G
 
     expect(after.rolled).toBe(true)
+    expect(after.lastRoll!.sum).not.toBe(7)
     expect(after.lastRoll).not.toBeNull()
     expect(after.lastRoll!.sum).toBe(after.lastRoll!.die1 + after.lastRoll!.die2)
     const bankAfter = Object.values(after.bank).reduce((a, b) => a + b, 0)
@@ -165,15 +204,7 @@ describe('CatanGame main phase', () => {
     client.moves.endTurn()
     expect(state(client).ctx.currentPlayer).toBe('0') // still player 0's turn
 
-    client.moves.roll()
-    // rejected moves advance bgio's rng, so the roll may be a 7 — resolve the robber if so
-    if (state(client).G.robberStep) {
-      const board = generateBoard(11)
-      const s = state(client)
-      client.moves.moveRobber(board.tiles.find((t) => t.id !== s.G.robberTileId)!.id)
-      const after = state(client)
-      if (after.G.robberStep === 'steal') client.moves.steal(after.G.stealTargets![0])
-    }
+    rollUntilProducing(client, 11) // a surprise 7 is resolved on the way
     client.moves.endTurn()
     expect(state(client).ctx.currentPlayer).toBe('1')
     expect(state(client).G.rolled).toBe(false) // reset for the new turn

@@ -37,7 +37,7 @@ Files to touch: `src/game/catan.ts` (moves + `bestTradeRate`), `src/game/catan.t
 - `events`/`random`/`playerID` are **separate move args**, not on `ctx`.
 - **Rejected moves still advance the seeded rng** — tests that roll "until 7" see different sequences depending on prior rejected dispatches.
 - bgio state is immer-frozen → in tests `structuredClone(state.G)` before mutating (see `fakeG` / `mainG`).
-- The `seed` client option (rng determinism) is untyped in 0.50 — cast as in `makeClient`.
+- **The `seed` client option does NOT make the 0.50 local client's rng deterministic** — rolls are effectively Math.random-backed and a “guaranteed non-7” roll can still come up 7. Tests must tolerate surprise 7s: use `rollUntilProducing(client, seed)` (resolves discard/move/steal and re-rolls) instead of asserting on one roll. The `seed` option is also untyped — cast as in `makeClient`.
 - Main phase turn order is a custom `mainOrder` (CONTINUE-style) so player 0 — the last setup placer — takes the first turn.
 - **Unit-testing moves without a client**: `CatanGame.phases.main.moves.placeRoad({ G, ctx }, args)` works on a `structuredClone`d G + plain ctx (see `mainG`/`ctx0` in `catan.test.ts`) — precise, deterministic, no rng drift.
 
