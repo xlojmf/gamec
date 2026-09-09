@@ -15,7 +15,7 @@ M0–M11 done, committed, all green (typecheck ✅ · 70/70 tests ✅ · build �
 | M8 player turns (boardgame.io engine, hotseat) | `0434064` |
 | M9 building rules (costs, supply, connectivity, upgradeCity) | `0ac2ea6` |
 | M10 trading (bank/ports, domestic propose-accept) | `48a7931` |
-| M11 dev cards & awards | *(this session — see `git log`)* |
+| M11 dev cards & awards | `24aeee1` |
 
 The hotseat game is the **complete base game**: setup draft → roll/produce → trade (maritime + domestic) → build with full rules → dev cards (Knight/Road Building/Year of Plenty/Monopoly/VP) → Longest Road & Largest Army → 10 VP win.
 
