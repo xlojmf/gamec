@@ -20,6 +20,7 @@ import { BANK_START, computeProduction, type Building } from './production'
 import { INVALID_MOVE } from 'boardgame.io/core'
 import {
   RESOURCES,
+  RESOURCE_ICONS,
   TERRAIN_INFO,
   emptyResourceCounts,
   totalCards,
@@ -28,6 +29,16 @@ import {
 } from './terrain'
 
 export const VICTORY_POINTS = 10
+
+/** Build costs paid to the bank (PRD §5.7). Dev cards land in M11. */
+export const BUILD_COSTS: Record<'road' | 'settlement' | 'city', Partial<ResourceCounts>> = {
+  road: { wood: 1, brick: 1 },
+  settlement: { wood: 1, brick: 1, grain: 1, wool: 1 },
+  city: { grain: 2, ore: 3 },
+}
+
+/** Hard piece limits per player (PRD §5.1). */
+export const SUPPLY_LIMITS = { road: 15, settlement: 5, city: 4 } as const
 
 export interface RoadSpot {
   player: number
@@ -127,17 +138,61 @@ export function vpCounts(G: GameState): number[] {
   return vps
 }
 
+/** Pieces a player still has in supply (setup placements count as used). */
+export function pieceCounts(
+  G: GameState,
+  player: number,
+): { road: number; settlement: number; city: number } {
+  let road = 0
+  let settlement = 0
+  let city = 0
+  for (const e of Object.values(G.buildings.edges)) if (e.player === player) road++
+  for (const b of Object.values(G.buildings.vertices)) {
+    if (b.player !== player) continue
+    if (b.type === 'city') city++
+    else settlement++
+  }
+  return { road, settlement, city }
+}
+
+function canAfford(hand: ResourceCounts, cost: Partial<ResourceCounts>): boolean {
+  return RESOURCES.every((r) => hand[r] >= (cost[r] ?? 0))
+}
+
+/** Pay a build cost to the bank (caller must have checked affordability). */
+function payCost(G: GameState, player: number, cost: Partial<ResourceCounts>) {
+  const hand = { ...G.hands[player] }
+  const bank = { ...G.bank }
+  for (const r of RESOURCES) {
+    if (!cost[r]) continue
+    hand[r] -= cost[r] as number
+    bank[r] += cost[r] as number
+  }
+  G.hands[player] = hand
+  G.bank = bank
+}
+
+function costLabel(cost: Partial<ResourceCounts>): string {
+  return RESOURCES.filter((r) => cost[r]).map((r) => `${RESOURCE_ICONS[r]}×${cost[r]}`).join('')
+}
+
+/** Distance rule: no existing building on an adjacent junction. */
+function respectsDistance(G: GameState, board: Board, vertexId: VertexId): boolean {
+  const v = board.vertexById.get(vertexId)
+  if (!v) return false
+  return !v.edgeIds.some((eid) => {
+    const edge = board.edgeById.get(eid)!
+    return edge.vertexIds.some((other) => other !== vertexId && G.buildings.vertices[other])
+  })
+}
+
 /** Empty + distance rule (no building on an adjacent junction). */
 export function validSetupVertices(G: GameState): VertexId[] {
   const board = boardFor(G.seed)
   const out: VertexId[] = []
   for (const v of board.vertices) {
     if (G.buildings.vertices[v.id]) continue
-    const blocked = v.edgeIds.some((eid) => {
-      const edge = board.edgeById.get(eid)!
-      return edge.vertexIds.some((other) => other !== v.id && G.buildings.vertices[other])
-    })
-    if (!blocked) out.push(v.id)
+    if (respectsDistance(G, board, v.id)) out.push(v.id)
   }
   return out
 }
@@ -148,6 +203,55 @@ export function validSetupEdges(G: GameState, vertexId: VertexId): EdgeId[] {
   const v = board.vertexById.get(vertexId)
   if (!v) return []
   return v.edgeIds.filter((eid) => !G.buildings.edges[eid])
+}
+
+/**
+ * Can a road connect through this junction? Own building anchors it; an empty
+ * junction connects if another own road already touches it; an opponent's
+ * building severs the network (PRD §5.3.3 — matters for Longest Road in M11).
+ */
+function connectsThrough(G: GameState, board: Board, vertexId: VertexId, player: number): boolean {
+  const building = G.buildings.vertices[vertexId]
+  if (building) return building.player === player
+  const v = board.vertexById.get(vertexId)
+  if (!v) return false
+  return v.edgeIds.some((eid) => G.buildings.edges[eid]?.player === player)
+}
+
+/** Fully legal road spots: empty, connected, affordable, supply remaining. */
+export function validRoadEdges(G: GameState, player: number): EdgeId[] {
+  const board = boardFor(G.seed)
+  if (pieceCounts(G, player).road >= SUPPLY_LIMITS.road) return []
+  if (!canAfford(G.hands[player], BUILD_COSTS.road)) return []
+  const out: EdgeId[] = []
+  for (const e of board.edges) {
+    if (G.buildings.edges[e.id]) continue
+    if (e.vertexIds.some((vid) => connectsThrough(G, board, vid, player))) out.push(e.id)
+  }
+  return out
+}
+
+/** Fully legal settlement spots: empty, distance rule, own road, affordable, supply. */
+export function validSettlementVertices(G: GameState, player: number): VertexId[] {
+  const board = boardFor(G.seed)
+  if (pieceCounts(G, player).settlement >= SUPPLY_LIMITS.settlement) return []
+  if (!canAfford(G.hands[player], BUILD_COSTS.settlement)) return []
+  const out: VertexId[] = []
+  for (const v of board.vertices) {
+    if (G.buildings.vertices[v.id]) continue
+    if (!respectsDistance(G, board, v.id)) continue
+    if (v.edgeIds.some((eid) => G.buildings.edges[eid]?.player === player)) out.push(v.id)
+  }
+  return out
+}
+
+/** Fully legal city upgrades: own settlements, affordable, city supply remaining. */
+export function validCityVertices(G: GameState, player: number): VertexId[] {
+  if (pieceCounts(G, player).city >= SUPPLY_LIMITS.city) return []
+  if (!canAfford(G.hands[player], BUILD_COSTS.city)) return []
+  return Object.entries(G.buildings.vertices)
+    .filter(([, b]) => b.player === player && b.type === 'settlement')
+    .map(([vid]) => vid as VertexId)
 }
 
 /** Players (≠ mover) with a building next to the robber's tile and ≥1 card. */
@@ -337,19 +441,31 @@ function steal({ G, ctx, random }: MoveArgs, victimId: number) {
 function placeSettlement({ G, ctx }: MoveArgs, vertexId: VertexId) {
   if (!G) return INVALID
   if (!G.rolled || G.robberStep) return INVALID
-  if (G.buildings.vertices[vertexId]) return INVALID
   const player = Number(ctx.currentPlayer)
+  if (!validSettlementVertices(G, player).includes(vertexId)) return INVALID
+  payCost(G, player, BUILD_COSTS.settlement)
   G.buildings.vertices[vertexId] = { player, type: 'settlement' }
-  pushLog(G, `${PLAYER_NAMES[player]} built a settlement`)
+  pushLog(G, `${PLAYER_NAMES[player]} built a settlement (${costLabel(BUILD_COSTS.settlement)})`)
 }
 
 function placeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
   if (!G) return INVALID
   if (!G.rolled || G.robberStep) return INVALID
-  if (G.buildings.edges[edgeId]) return INVALID
   const player = Number(ctx.currentPlayer)
+  if (!validRoadEdges(G, player).includes(edgeId)) return INVALID
+  payCost(G, player, BUILD_COSTS.road)
   G.buildings.edges[edgeId] = { player }
-  pushLog(G, `${PLAYER_NAMES[player]} built a road`)
+  pushLog(G, `${PLAYER_NAMES[player]} built a road (${costLabel(BUILD_COSTS.road)})`)
+}
+
+function upgradeCity({ G, ctx }: MoveArgs, vertexId: VertexId) {
+  if (!G) return INVALID
+  if (!G.rolled || G.robberStep) return INVALID
+  const player = Number(ctx.currentPlayer)
+  if (!validCityVertices(G, player).includes(vertexId)) return INVALID
+  payCost(G, player, BUILD_COSTS.city)
+  G.buildings.vertices[vertexId] = { player, type: 'city' }
+  pushLog(G, `${PLAYER_NAMES[player]} upgraded a city (${costLabel(BUILD_COSTS.city)})`)
 }
 
 function endTurn({ G, events }: MoveArgs) {
@@ -423,7 +539,7 @@ export const CatanGame = {
           discard: { moves: { discardHalf } },
         },
       },
-      moves: { roll, moveRobber, steal, placeSettlement, placeRoad, endTurn },
+      moves: { roll, moveRobber, steal, placeSettlement, placeRoad, upgradeCity, endTurn },
     },
   },
 
@@ -450,4 +566,4 @@ export function createCatanGame(seed: number) {
 }
 
 // exported for unit tests (exercised through the client in integration tests)
-export const _internals = { applyProduction, beginRobberFlow, doSteal, grantSetupResources }
+export const _internals = { applyProduction, beginRobberFlow, doSteal, grantSetupResources, payCost }

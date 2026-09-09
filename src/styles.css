@@ -360,6 +360,21 @@ code {
   justify-content: center;
   font-size: 0.85rem;
   padding: 0.5em 0.6em;
+  flex-direction: column;
+  gap: 0.15em;
+}
+.build-cost {
+  display: flex;
+  gap: 0.3em;
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+.build-cost .lack {
+  color: #e5735f;
+  opacity: 1;
+}
+.supply-line {
+  margin: 0.4em 0 0;
 }
 
 /* --- dice ----------------------------------------------------------------- */

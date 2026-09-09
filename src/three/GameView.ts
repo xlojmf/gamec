@@ -33,10 +33,13 @@ export interface PlacementState {
   edges: Map<EdgeId, EdgePlacement>
 }
 
-export type BuildKind = 'settlement' | 'road' | null
+export type BuildKind = 'settlement' | 'city' | 'road' | null
 export interface BuildMode {
   kind: BuildKind
   player: number
+  /** When set, ghosts show exactly these legal spots (engine-filtered). */
+  allowedVertices?: Set<string> | null
+  allowedEdges?: Set<string> | null
 }
 
 export interface HoverInfo {
@@ -783,15 +786,26 @@ export class GameView {
   }
 
   private refreshGhosts() {
-    const { kind, player } = this.mode
+    const { kind, player, allowedVertices, allowedEdges } = this.mode
     const color = new THREE.Color(PLAYER_COLORS[player])
     for (const [id, mesh] of this.ghostVertexMeshes) {
-      const active = kind === 'settlement' && !this.placements.vertices.has(id)
+      // city ghosts float above the settlement they would upgrade
+      mesh.position.y = TILE_TOP + (kind === 'city' ? 0.5 : 0.015)
+      const building = this.placements.vertices.get(id)
+      const active = allowedVertices
+        ? allowedVertices.has(id)
+        : kind === 'settlement'
+          ? !building
+          : kind === 'city'
+            ? building?.type === 'settlement' && building.player === player
+            : false
       mesh.visible = active
       if (active) (mesh.material as THREE.MeshBasicMaterial).color.copy(color)
     }
     for (const [id, mesh] of this.ghostEdgeMeshes) {
-      const active = kind === 'road' && !this.placements.edges.has(id)
+      const active = allowedEdges
+        ? allowedEdges.has(id)
+        : kind === 'road' && !this.placements.edges.has(id)
       mesh.visible = active
       if (active) (mesh.material as THREE.MeshBasicMaterial).color.copy(color)
     }

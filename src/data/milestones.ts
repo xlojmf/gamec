@@ -16,8 +16,8 @@ export const MILESTONES: Milestone[] = [
   { id: 'M6', title: 'Dice', detail: 'Animated 3D dice roll, 7 → robber mode (move flow)', status: 'done' },
   { id: 'M7', title: 'Resource production', detail: 'Yields, player hands, bank limits (tested)', status: 'done' },
   { id: 'M8', title: 'Player turns', detail: 'boardgame.io engine: snake draft, turn phases, robber discard/move/steal', status: 'done' },
-  { id: 'M9', title: 'Building rules', detail: 'Costs, supply, connectivity, distance rule', status: 'next' },
-  { id: 'M10', title: 'Trading', detail: 'Bank 4:1, ports, player trades', status: 'todo' },
+  { id: 'M9', title: 'Building rules', detail: 'Costs, supply limits, connectivity, distance rule, city upgrade, legal-spot ghosts', status: 'done' },
+  { id: 'M10', title: 'Trading', detail: 'Bank 4:1, ports, player trades', status: 'next' },
   { id: 'M11', title: 'Development cards', detail: 'Deck, restrictions, longest road / largest army', status: 'todo' },
   { id: 'M12', title: 'Multiplayer', detail: 'boardgame.io server, rooms, hidden hands, reconnect', status: 'todo' },
 ]

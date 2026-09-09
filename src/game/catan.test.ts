@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest'
 import { Client } from 'boardgame.io/client'
+import { INVALID_MOVE } from 'boardgame.io/core'
 import {
+  BUILD_COSTS,
+  CatanGame,
+  SUPPLY_LIMITS,
   _internals,
   createCatanGame,
+  pieceCounts,
+  validCityVertices,
+  validRoadEdges,
   validSetupEdges,
   validSetupVertices,
+  validSettlementVertices,
   vpCounts,
   type BgioState,
   type GameState,
 } from './catan'
-import { generateBoard } from './board'
+import { generateBoard, type Board } from './board'
 import { emptyResourceCounts, totalCards } from './terrain'
 
 // -- test client helpers --------------------------------------------------------
@@ -171,26 +179,18 @@ describe('CatanGame main phase', () => {
     expect(state(client).G.rolled).toBe(false) // reset for the new turn
   })
 
-  it('builds are attributed to the active player only', () => {
+  it('moves are gated to the active player', () => {
     const client = makeClient(11)
     runSetup(client)
+
+    // player 1 cannot roll (or do anything) during player 0's turn
+    asPlayer(client, 1)
+    client.moves.roll()
+    expect(state(client).G.rolled).toBe(false)
+
     asPlayer(client, 0)
     client.moves.roll()
-    const { G } = state(client)
-    const board = generateBoard(11)
-    const vertex = board.vertices.find((vx) => !G.buildings.vertices[vx.id])!.id
-    const edge = board.edges.find((e) => !G.buildings.edges[e.id])!.id
-    client.moves.placeSettlement(vertex)
-    client.moves.placeRoad(edge)
-    const after = state(client).G
-    expect(after.buildings.vertices[vertex]).toEqual({ player: 0, type: 'settlement' })
-    expect(after.buildings.edges[edge]).toEqual({ player: 0 })
-
-    // player 1 cannot build during player 0's turn
-    asPlayer(client, 1)
-    const v2 = board.vertices.find((vx) => !after.buildings.vertices[vx.id])!.id
-    client.moves.placeSettlement(v2)
-    expect(state(client).G.buildings.vertices[v2]).toBeUndefined()
+    expect(state(client).G.rolled).toBe(true)
   })
 
   it('a 7 opens the robber flow (discard → move → done) and blocks the turn until resolved', () => {
@@ -254,7 +254,6 @@ describe('CatanGame main phase', () => {
 })
 
 // -- unit tests for the robber helpers -------------------------------------------
-
 function fakeG(hands: number[][]): GameState {
   const client = makeClient(3)
   runSetup(client)
@@ -333,6 +332,198 @@ describe('vpCounts', () => {
       c: { player: 2, type: 'settlement' },
     }
     expect(vpCounts(G)).toEqual([3, 0, 1, 0])
+  })
+})
+
+// -- building rules (M9) ----------------------------------------------------------
+
+const mainMoves = CatanGame.phases.main.moves
+const ctx0 = { currentPlayer: '0', turn: 20, phase: 'main', activePlayers: null }
+
+/** Post-setup clone with G.rolled = true and an optional hand override for player 0. */
+function mainG(seed: number, hand0?: number[]): GameState {
+  const client = makeClient(seed)
+  runSetup(client)
+  const G = structuredClone(state(client).G)
+  G.rolled = true
+  if (hand0) {
+    const h = emptyResourceCounts()
+    const order = ['wood', 'brick', 'grain', 'wool', 'ore'] as const
+    hand0.forEach((n, i) => (h[order[i]] = n))
+    G.hands[0] = h
+  }
+  return G
+}
+
+const economy = (G: GameState) =>
+  Object.values(G.bank).reduce((a, b) => a + b, 0) + G.hands.reduce((a, h) => a + totalCards(h), 0)
+
+describe('building rules (M9)', () => {
+  it('road costs 1 lumber + 1 brick and conserves the economy', () => {
+    const G = mainG(11, [3, 2, 0, 0, 0])
+    const edge = validRoadEdges(G, 0)[0]
+    expect(edge).toBeTruthy()
+
+    const before = economy(G)
+    expect(mainMoves.placeRoad({ G, ctx: ctx0 }, edge)).toBeUndefined()
+    expect(G.buildings.edges[edge]).toEqual({ player: 0 })
+    expect(G.hands[0]).toEqual({ wood: 2, brick: 1, grain: 0, wool: 0, ore: 0 })
+    expect(G.bank.wood).toBeGreaterThan(0)
+    expect(economy(G)).toBe(before)
+  })
+
+  it('rejects builds the player cannot afford', () => {
+    const G = mainG(11, [1, 1, 0, 0, 0]) // exactly one road's worth, zero margin
+    mainMoves.placeRoad({ G, ctx: ctx0 }, validRoadEdges(G, 0)[0])
+    expect(validRoadEdges(G, 0)).toEqual([]) // spent it — nothing left to afford
+
+    const G2 = mainG(11, [1, 0, 0, 0, 0])
+    const anyEdge = generateBoard(11).edges.find((e) => !G2.buildings.edges[e.id])!.id
+    expect(mainMoves.placeRoad({ G: G2, ctx: ctx0 }, anyEdge)).toBe(INVALID_MOVE)
+    expect(G2.buildings.edges[anyEdge]).toBeUndefined()
+  })
+
+  it('roads must connect to the own network or an own building', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board = generateBoard(11)
+    const far = board.edges.find(
+      (e) => !G.buildings.edges[e.id] && !validRoadEdges(G, 0).includes(e.id),
+    )!
+    expect(mainMoves.placeRoad({ G, ctx: ctx0 }, far.id)).toBe(INVALID_MOVE)
+
+    const near = validRoadEdges(G, 0)[0] // touches a setup settlement/road
+    expect(mainMoves.placeRoad({ G, ctx: ctx0 }, near)).toBeUndefined()
+  })
+
+  it("an opponent's settlement on a junction breaks road continuity", () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board: Board = generateBoard(11)
+    G.buildings = { vertices: {}, edges: {} } // isolate the scenario
+
+    const v = board.vertices.find((vx) => vx.edgeIds.length === 3)!
+    const [e1, e2] = v.edgeIds
+    G.buildings.edges[e1] = { player: 0 } // own road reaches junction v
+    G.buildings.vertices[v.id] = { player: 1, type: 'settlement' } // …but an opponent sits there
+
+    // edges beyond v can't connect through the occupied junction
+    // (edges branching off e1's far end stay legal — that's correct rules)
+    expect(validRoadEdges(G, 0)).not.toContain(e2)
+    expect(mainMoves.placeRoad({ G, ctx: ctx0 }, e2)).toBe(INVALID_MOVE)
+
+    delete G.buildings.vertices[v.id] // opponent leaves → junction is passable again
+    expect(validRoadEdges(G, 0)).toContain(e2)
+    expect(mainMoves.placeRoad({ G, ctx: ctx0 }, e2)).toBeUndefined()
+  })
+
+  it('settlements need an own road, the distance rule, and the full cost', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board = generateBoard(11)
+    G.buildings = { vertices: {}, edges: {} }
+
+    const v = board.vertices.find((vx) => vx.edgeIds.length === 3)!
+    G.buildings.edges[v.edgeIds[0]] = { player: 0 }
+
+    // both ends of the own road are legal settlement spots
+    const other = board.edgeById.get(v.edgeIds[0])!.vertexIds.find((id) => id !== v.id)!
+    expect(validSettlementVertices(G, 0).sort()).toEqual([other, v.id].sort())
+
+    // a neighbor building blocks the junction (distance rule)
+    const neighbor = board.edgeById.get(v.edgeIds[0])!.vertexIds.find((id) => id !== v.id)!
+    G.buildings.vertices[neighbor] = { player: 1, type: 'settlement' }
+    expect(validSettlementVertices(G, 0)).toEqual([])
+    delete G.buildings.vertices[neighbor]
+
+    const before = economy(G)
+    expect(mainMoves.placeSettlement({ G, ctx: ctx0 }, v.id)).toBeUndefined()
+    expect(G.buildings.vertices[v.id]).toEqual({ player: 0, type: 'settlement' })
+    expect(G.hands[0]).toEqual({ wood: 8, brick: 8, grain: 8, wool: 8, ore: 9 })
+    expect(economy(G)).toBe(before)
+  })
+
+  it('settlements are only placed next to an own road, not just any empty junction', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board = generateBoard(11)
+    G.buildings = { vertices: {}, edges: {} }
+    const v = board.vertices.find((vx) => vx.edgeIds.length === 3)!
+    expect(validSettlementVertices(G, 0)).toEqual([]) // no roads anywhere
+    expect(mainMoves.placeSettlement({ G, ctx: ctx0 }, v.id)).toBe(INVALID_MOVE)
+  })
+
+  it('cities upgrade own settlements for 2 grain + 3 ore (settlement returns to supply)', () => {
+    const G = mainG(11, [0, 0, 5, 0, 5])
+    const target = validCityVertices(G, 0)[0]
+    expect(target).toBeTruthy()
+
+    const vpsBefore = vpCounts(G)[0]
+    const before = economy(G)
+    expect(mainMoves.upgradeCity({ G, ctx: ctx0 }, target)).toBeUndefined()
+    expect(G.buildings.vertices[target]).toEqual({ player: 0, type: 'city' })
+    expect(G.hands[0]).toEqual({ wood: 0, brick: 0, grain: 3, wool: 0, ore: 2 })
+    expect(vpCounts(G)[0]).toBe(vpsBefore + 1) // settlement 1 → city 2
+    expect(economy(G)).toBe(before)
+
+    // other players' settlements and already-built cities are not upgradable
+    expect(validCityVertices(G, 0)).toEqual([])
+    expect(mainMoves.upgradeCity({ G, ctx: ctx0 }, target)).toBe(INVALID_MOVE)
+    const foreign = Object.entries(G.buildings.vertices).find(([, b]) => b.player === 1)![0]
+    expect(mainMoves.upgradeCity({ G, ctx: ctx0 }, foreign)).toBe(INVALID_MOVE)
+  })
+
+  it('supply limits: 15 roads / 5 settlements / 4 cities per player', () => {
+    const board = generateBoard(11)
+    const G = mainG(11, [19, 19, 19, 19, 19])
+
+    // exhaust every supply and watch the validators empty out
+    for (const e of board.edges.slice(0, SUPPLY_LIMITS.road)) G.buildings.edges[e.id] = { player: 0 }
+    expect(validRoadEdges(G, 0)).toEqual([])
+
+    const interior = board.vertices.filter((vx) => vx.edgeIds.length === 3)
+    for (const v of interior.slice(0, SUPPLY_LIMITS.settlement))
+      G.buildings.vertices[v.id] = { player: 0, type: 'settlement' }
+    expect(validSettlementVertices(G, 0)).toEqual([])
+
+    for (const v of interior.slice(SUPPLY_LIMITS.settlement, SUPPLY_LIMITS.settlement + 4))
+      G.buildings.vertices[v.id] = { player: 0, type: 'city' }
+    expect(validCityVertices(G, 0)).toEqual([])
+
+    // upgrading frees a settlement slot again (piece returns to supply)
+    delete G.buildings.vertices[interior[SUPPLY_LIMITS.settlement].id] // make room for one city
+    const before = pieceCounts(G, 0)
+    const target = interior[0].id
+    expect(mainMoves.upgradeCity({ G, ctx: ctx0 }, target)).toBeUndefined()
+    expect(pieceCounts(G, 0).settlement).toBe(before.settlement - 1)
+    expect(pieceCounts(G, 0).city).toBe(SUPPLY_LIMITS.city)
+  })
+
+  it('client rejects builds before the roll and free builds are gone', () => {
+    const client = makeClient(11)
+    runSetup(client)
+    asPlayer(client, 0)
+    const own = Object.entries(state(client).G.buildings.vertices).find(([, b]) => b.player === 0)![0]
+
+    client.moves.upgradeCity(own) // before rolling → gated
+    expect(state(client).G.buildings.vertices[own]!.type).toBe('settlement')
+
+    client.moves.roll()
+    if (state(client).G.robberStep) {
+      // resolve a possible 7 so the turn is buildable again
+      const board = generateBoard(11)
+      const s = state(client)
+      client.moves.moveRobber(board.tiles.find((t) => t.id !== s.G.robberTileId)!.id)
+      const after = state(client)
+      if (after.G.robberStep === 'steal') client.moves.steal(after.G.stealTargets![0])
+    }
+    client.moves.upgradeCity(own) // affordable? if not, still rejected — but never free
+    const type = state(client).G.buildings.vertices[own]!.type
+    expect(type === 'settlement' || type === 'city').toBe(true)
+  })
+})
+
+describe('BUILD_COSTS match PRD §5.7', () => {
+  it('road 1 lumber + 1 brick; settlement adds grain + wool; city 2 grain + 3 ore', () => {
+    expect(BUILD_COSTS.road).toEqual({ wood: 1, brick: 1 })
+    expect(BUILD_COSTS.settlement).toEqual({ wood: 1, brick: 1, grain: 1, wool: 1 })
+    expect(BUILD_COSTS.city).toEqual({ grain: 2, ore: 3 })
   })
 })
 

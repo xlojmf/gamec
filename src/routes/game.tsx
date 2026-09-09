@@ -7,6 +7,7 @@ import {
   PLAYER_COUNT,
   PLAYER_NAMES,
   type BuildKind,
+  type BuildMode,
   type HoverInfo,
   type PickTarget,
   type PlacementState,
@@ -15,9 +16,15 @@ import { generateBoard } from '#/game/board'
 import { randomSeed } from '#/game/rng'
 import { isRobberRoll, type DiceRoll } from '#/game/dice'
 import {
+  BUILD_COSTS,
+  SUPPLY_LIMITS,
   createCatanGame,
+  pieceCounts,
+  validCityVertices,
+  validRoadEdges,
   validSetupEdges,
   validSetupVertices,
+  validSettlementVertices,
   vpCounts,
   type BgioState,
 } from '#/game/catan'
@@ -146,6 +153,20 @@ function DiscardPanel({
   )
 }
 
+/** Cost line for build buttons; resources the player lacks turn red. */
+function CostTag({ cost, hand }: { cost: Partial<ResourceCounts>; hand: ResourceCounts }) {
+  return (
+    <span className="build-cost">
+      {RESOURCES.filter((r) => cost[r]).map((r) => (
+        <span key={r} className={hand[r] >= (cost[r] ?? 0) ? '' : 'lack'}>
+          {RESOURCE_ICONS[r]}
+          {cost[r]}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 function GamePage() {
   const [seed, setSeed] = useState(() => randomSeed())
   const { state, move } = useCatanClient(seed)
@@ -220,9 +241,10 @@ function GamePage() {
         }
         return
       }
-      // main phase: build as the active player (costs land in M9)
+      // main phase: build as the active player (engine validates cost/legality)
       if (phase === 'main' && G.rolled && !G.robberStep) {
         if (target.kind === 'vertex' && kind === 'settlement') move(current, (m) => m.placeSettlement(target.id))
+        if (target.kind === 'vertex' && kind === 'city') move(current, (m) => m.upgradeCity(target.id))
         if (target.kind === 'edge' && kind === 'road') move(current, (m) => m.placeRoad(target.id))
       }
     },
@@ -237,20 +259,29 @@ function GamePage() {
     move(current, (m) => m.roll())
   }
 
-  // build mode shown to GameCanvas
-  const mode = useMemo(() => {
-    if (phase === 'setup') {
+  // build mode shown to GameCanvas — ghosts are pre-filtered to legal spots
+  const mode = useMemo<BuildMode>(() => {
+    if (phase === 'setup' && G) {
       return setupVertex
-        ? { kind: 'road' as BuildKind, player: current }
-        : { kind: 'settlement' as BuildKind, player: current }
+        ? { kind: 'road', player: current, allowedEdges: new Set(validSetupEdges(G, setupVertex)) }
+        : { kind: 'settlement', player: current, allowedVertices: new Set(validSetupVertices(G)) }
     }
-    return { kind: G?.robberStep ? null : kind, player: current }
-  }, [phase, setupVertex, current, kind, G?.robberStep])
+    if (!G || phase !== 'main' || !G.rolled || G.robberStep) return { kind: null, player: current }
+    if (kind === 'road') return { kind, player: current, allowedEdges: new Set(validRoadEdges(G, current)) }
+    if (kind === 'settlement')
+      return { kind, player: current, allowedVertices: new Set(validSettlementVertices(G, current)) }
+    if (kind === 'city') return { kind, player: current, allowedVertices: new Set(validCityVertices(G, current)) }
+    return { kind: null, player: current }
+  }, [phase, setupVertex, current, kind, G])
 
   if (!G || !ctx) return <div className="game-shell" />
 
   const robberMode = G.robberStep === 'move'
   const canBuild = phase === 'main' && G.rolled && !G.robberStep
+  const roadSpots = canBuild ? validRoadEdges(G, current) : []
+  const settlementSpots = canBuild ? validSettlementVertices(G, current) : []
+  const citySpots = canBuild ? validCityVertices(G, current) : []
+  const supply = pieceCounts(G, current)
   const discardPid = G.robberStep === 'discard' ? Number(Object.keys(G.pendingDiscards)[0]) : null
   const diceResult: DiceRoll | null = G.lastRoll
   const vps = vpCounts(G)
@@ -378,25 +409,39 @@ function GamePage() {
             <div className="build-row">
               <button
                 className={`btn ${kind === 'road' ? 'btn-active' : ''}`}
-                disabled={!canBuild}
+                disabled={!canBuild || roadSpots.length === 0}
                 onClick={() => setKind(kind === 'road' ? null : 'road')}
               >
-                🛣 Road
+                <span>🛣 Road</span>
+                <CostTag cost={BUILD_COSTS.road} hand={G.hands[current]} />
               </button>
               <button
                 className={`btn ${kind === 'settlement' ? 'btn-active' : ''}`}
-                disabled={!canBuild}
+                disabled={!canBuild || settlementSpots.length === 0}
                 onClick={() => setKind(kind === 'settlement' ? null : 'settlement')}
               >
-                🏠 Settlement
+                <span>🏠 Settlement</span>
+                <CostTag cost={BUILD_COSTS.settlement} hand={G.hands[current]} />
+              </button>
+              <button
+                className={`btn ${kind === 'city' ? 'btn-active' : ''}`}
+                disabled={!canBuild || citySpots.length === 0}
+                onClick={() => setKind(kind === 'city' ? null : 'city')}
+              >
+                <span>🏙 City</span>
+                <CostTag cost={BUILD_COSTS.city} hand={G.hands[current]} />
               </button>
             </div>
+            <p className="muted small supply-line">
+              supply: 🛣 {SUPPLY_LIMITS.road - supply.road} · 🏠 {SUPPLY_LIMITS.settlement - supply.settlement} · 🏙{' '}
+              {SUPPLY_LIMITS.city - supply.city} left
+            </p>
             <button className="btn end-turn-btn" disabled={!canBuild} onClick={() => move(current, (m) => m.endTurn())}>
               End turn ⟶
             </button>
             <p className="muted small">
               {canBuild
-                ? 'Build freely for now — costs & legality checks land in M9.'
+                ? 'Glowing spots are legal — costs are paid to the bank.'
                 : 'Roll the dice first; build afterwards.'}
             </p>
           </>
