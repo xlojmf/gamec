@@ -14,7 +14,7 @@ M0–M10 done, committed, all green (typecheck ✅ · 52/52 tests ✅ · build �
 | M7 resource production (hands, bank, pulses) | `af95e2e` |
 | M8 player turns (boardgame.io engine, hotseat) | `0434064` |
 | M9 building rules (costs, supply, connectivity, upgradeCity) | `0ac2ea6` |
-| M10 trading (bank/ports, domestic propose-accept) | *(this session — see `git log`)* |
+| M10 trading (bank/ports, domestic propose-accept) | `48a7931` |
 
 The game currently plays the full base game minus dev cards: snake-draft setup → roll/produce → trade (maritime 4:1/3:1/2:1 + domestic with accept/decline overlay) → build with full rules → 7 flow → 10 VP win.
 
