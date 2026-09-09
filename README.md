@@ -58,18 +58,19 @@ src/
 | M7 | Resource production | ✅ |
 | M8 | Player turns (boardgame.io local) | ✅ |
 | M9 | Building rules | ✅ |
-| M10 | Trading | ⏳ next |
-| M11 | Development cards | ⏳ |
+| M10 | Trading (bank, ports, player trades) | ✅ |
+| M11 | Development cards | ⏳ next |
 | M12 | Multiplayer (boardgame.io server) | ⏳ |
 | A1–A3 | GPT Astra art passes (concept → world textures → UI kit) | ⏳ |
 
 Details and acceptance criteria per milestone: [`PRD.md §6`](./PRD.md).
 
-## Playing today (M9 hotseat game)
+## Playing today (M10 hotseat game)
 
 - **Setup**: snake draft — each player places a settlement + connecting road (glowing spots), twice; second settlements pay out starting resources.
-- **Turns**: roll the animated 3D dice → producing hexes pulse green and hands update → buy roads/settlements/cities → end turn.
+- **Turns**: roll the animated 3D dice → producing hexes pulse green and hands update → trade → buy roads/settlements/cities → end turn.
 - **Building rules (M9)**: costs per PRD §5.7 are paid to the bank (🪵🧱 / 🪵🧱🌾🐑 / 🌾🌾⛏⛏⛏), supply is capped at 15 roads / 5 settlements / 4 cities, roads must connect to your network (an opponent's settlement cuts a junction), settlements obey the distance rule, and cities upgrade your own settlements. Ghost highlights show only legal spots; the City button upgrades a glowing settlement.
+- **Trading (M10)**: maritime trades at 4:1, 3:1 with a generic port, or 2:1 with a matching special port (rates show on the give chips); domestic trades via the player-trade overlay — the partner gets an accept/decline card and the turn is locked until they answer.
 - **Rolling a 7**: over-7-card hands discard half via the overlay, the active player hops the robber to any hex, then steals a random card from a chosen victim.
 - Hands, bank stacks (19 each), remaining supply and a compact log live in the HUD; first player to 10 VP wins.
 - Drag to rotate, scroll to zoom, right-drag to pan; hover hexes to inspect them.

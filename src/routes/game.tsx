@@ -18,6 +18,8 @@ import { isRobberRoll, type DiceRoll } from '#/game/dice'
 import {
   BUILD_COSTS,
   SUPPLY_LIMITS,
+  bankTradeRate,
+  countsLabel,
   createCatanGame,
   pieceCounts,
   validCityVertices,
@@ -35,6 +37,7 @@ import {
   TERRAIN_INFO,
   TERRAIN_COUNTS,
   totalCards,
+  type Resource,
   type ResourceCounts,
 } from '#/game/terrain'
 
@@ -167,6 +170,122 @@ function CostTag({ cost, hand }: { cost: Partial<ResourceCounts>; hand: Resource
   )
 }
 
+/** Tiny labelled −/value/+ stepper for trade offers. */
+function Stepper({
+  value,
+  max,
+  label,
+  onChange,
+}: {
+  value: number
+  max: number
+  label: string
+  onChange: (v: number) => void
+}) {
+  return (
+    <span className="trade-step">
+      <span className="trade-step-label">{label}</span>
+      <button className="btn btn-small" disabled={value === 0} onClick={() => onChange(value - 1)}>
+        −
+      </button>
+      <span className="stepper-value">{value}</span>
+      <button className="btn btn-small" disabled={value >= max} onClick={() => onChange(value + 1)}>
+        +
+      </button>
+    </span>
+  )
+}
+
+/** Domestic trade composer: pick a partner + terms, then propose. */
+function TradeOfferPanel({
+  proposer,
+  hands,
+  onPropose,
+  onClose,
+}: {
+  proposer: number
+  hands: ResourceCounts[]
+  onPropose: (partner: number, give: Partial<ResourceCounts>, take: Partial<ResourceCounts>) => void
+  onClose: () => void
+}) {
+  const [partner, setPartner] = useState<number | null>(null)
+  const [give, setGive] = useState<Partial<ResourceCounts>>({})
+  const [take, setTake] = useState<Partial<ResourceCounts>>({})
+  const giveTotal = RESOURCES.reduce((n, r) => n + (give[r] ?? 0), 0)
+  const takeTotal = RESOURCES.reduce((n, r) => n + (take[r] ?? 0), 0)
+  const overlap = RESOURCES.some((r) => (give[r] ?? 0) > 0 && (take[r] ?? 0) > 0)
+  const valid = partner !== null && giveTotal >= 1 && takeTotal >= 1 && !overlap
+
+  return (
+    <div className="overlay">
+      <div className="overlay-card">
+        <h3>
+          <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[proposer]) } as React.CSSProperties} />{' '}
+          {PLAYER_NAMES[proposer]} — propose a trade
+        </h3>
+        <div className="trade-partners">
+          {hands.map((_, p) =>
+            p !== proposer ? (
+              <button
+                key={p}
+                className={`chip ${partner === p ? 'chip-active' : ''}`}
+                style={{ '--chip': hex(PLAYER_COLORS[p]) } as React.CSSProperties}
+                onClick={() => {
+                  setPartner(p)
+                  setTake({})
+                }}
+              >
+                <span className="chip-dot" />
+                {PLAYER_NAMES[p]}
+              </button>
+            ) : null,
+          )}
+        </div>
+        <div className="trade-grid">
+          {RESOURCES.map((r) => (
+            <div key={r} className="discard-cell">
+              <span className="discard-label">
+                {RESOURCE_ICONS[r]} {RESOURCE_LABELS[r]}
+                <span className="muted small">
+                  {' '}
+                  you {hands[proposer][r]} · them {partner !== null ? hands[partner][r] : '—'}
+                </span>
+              </span>
+              <div className="trade-steppers">
+                <Stepper
+                  value={give[r] ?? 0}
+                  max={hands[proposer][r]}
+                  label="give"
+                  onChange={(v) => setGive((s) => ({ ...s, [r]: v }))}
+                />
+                <Stepper
+                  value={take[r] ?? 0}
+                  max={partner !== null ? hands[partner][r] : 0}
+                  label="get"
+                  onChange={(v) => setTake((s) => ({ ...s, [r]: v }))}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+        {overlap && <p className="small trade-warn">a trade can't include the same resource on both sides</p>}
+        <div className="overlay-actions">
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            disabled={!valid || partner === null}
+            onClick={() => onPropose(partner!, give, take)}
+          >
+            Offer {countsLabel(give)} for {countsLabel(take)}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function GamePage() {
   const [seed, setSeed] = useState(() => randomSeed())
   const { state, move } = useCatanClient(seed)
@@ -178,6 +297,9 @@ function GamePage() {
   const [rolling, setRolling] = useState(false)
   const [history, setHistory] = useState<number[]>([])
   const [setupVertex, setSetupVertex] = useState<string | null>(null)
+  const [bankGive, setBankGive] = useState<Resource | null>(null)
+  const [bankTake, setBankTake] = useState<Resource | null>(null)
+  const [showTradeOffer, setShowTradeOffer] = useState(false)
 
   const G = state?.G
   const ctx = state?.ctx
@@ -214,12 +336,21 @@ function GamePage() {
 
   const onRollDone = useCallback(() => setRolling(false), [])
 
+  // bank-trade selections reset whenever the turn moves on
+  useEffect(() => {
+    setBankGive(null)
+    setBankTake(null)
+  }, [current])
+
   const newGame = () => {
     setSeed(randomSeed())
     setKind(null)
     setRolling(false)
     setHistory([])
     setSetupVertex(null)
+    setBankGive(null)
+    setBankTake(null)
+    setShowTradeOffer(false)
     lastNonce.current = null
   }
 
@@ -278,10 +409,12 @@ function GamePage() {
 
   const robberMode = G.robberStep === 'move'
   const canBuild = phase === 'main' && G.rolled && !G.robberStep
+  const canTrade = canBuild && !G.pendingTrade
   const roadSpots = canBuild ? validRoadEdges(G, current) : []
   const settlementSpots = canBuild ? validSettlementVertices(G, current) : []
   const citySpots = canBuild ? validCityVertices(G, current) : []
   const supply = pieceCounts(G, current)
+  const giveRate = bankGive ? bankTradeRate(G, current, bankGive) : null
   const discardPid = G.robberStep === 'discard' ? Number(Object.keys(G.pendingDiscards)[0]) : null
   const diceResult: DiceRoll | null = G.lastRoll
   const vps = vpCounts(G)
@@ -296,9 +429,11 @@ function GamePage() {
           ? `${PLAYER_NAMES[current]} — move the robber`
           : G.robberStep === 'steal'
             ? `${PLAYER_NAMES[current]} — choose a victim to rob`
-            : !G.rolled
-              ? `${PLAYER_NAMES[current]} — roll the dice`
-              : `${PLAYER_NAMES[current]} — trade & build`
+            : G.pendingTrade
+              ? `${PLAYER_NAMES[G.pendingTrade.partner]} — respond to ${PLAYER_NAMES[G.pendingTrade.proposer]}'s trade offer`
+              : !G.rolled
+                ? `${PLAYER_NAMES[current]} — roll the dice`
+                : `${PLAYER_NAMES[current]} — trade & build`
 
   const terrainCounts = useMemo(() => TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count })), [])
 
@@ -405,6 +540,60 @@ function GamePage() {
 
         {phase === 'main' && (
           <>
+            <h3>Trade</h3>
+            <div className="trade-row">
+              <span className="trade-label">give</span>
+              {RESOURCES.map((r) => {
+                const rate = bankTradeRate(G, current, r)
+                return (
+                  <button
+                    key={r}
+                    className={`trade-chip ${bankGive === r ? 'trade-chip-active' : ''}`}
+                    disabled={!canTrade || G.hands[current][r] < rate}
+                    title={`${rate} ${RESOURCE_LABELS[r]} → 1 of another resource${rate === 2 ? ' (2:1 port)' : rate === 3 ? ' (3:1 port)' : ''}`}
+                    onClick={() => {
+                      setBankGive(bankGive === r ? null : r)
+                      if (bankTake === r) setBankTake(null)
+                    }}
+                  >
+                    {RESOURCE_ICONS[r]}
+                    <span className="trade-rate">{rate}:1</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="trade-row">
+              <span className="trade-label">get</span>
+              {RESOURCES.map((r) => (
+                <button
+                  key={r}
+                  className={`trade-chip ${bankTake === r ? 'trade-chip-active' : ''}`}
+                  disabled={!canTrade || G.bank[r] < 1 || r === bankGive}
+                  onClick={() => setBankTake(bankTake === r ? null : r)}
+                >
+                  {RESOURCE_ICONS[r]}
+                </button>
+              ))}
+            </div>
+            <button
+              className="btn bank-trade-btn"
+              disabled={!canTrade || !bankGive || !bankTake}
+              onClick={() => {
+                if (!bankGive || !bankTake) return
+                move(current, (m) => m.tradeBank(bankGive, bankTake))
+                setBankTake(null)
+              }}
+            >
+              ⚖️ {bankGive && bankTake && giveRate ? `${giveRate}${RESOURCE_ICONS[bankGive]} → 1${RESOURCE_ICONS[bankTake]}` : 'bank trade'}
+            </button>
+            <button className="btn player-trade-btn" disabled={!canTrade} onClick={() => setShowTradeOffer(true)}>
+              🤝 player trade…
+            </button>
+          </>
+        )}
+
+        {phase === 'main' && (
+          <>
             <h3>Build</h3>
             <div className="build-row">
               <button
@@ -496,6 +685,46 @@ function GamePage() {
           hand={G.hands[discardPid]}
           required={G.pendingDiscards[discardPid]}
           onConfirm={(cards) => move(discardPid, (m) => m.discardHalf(cards))}
+        />
+      )}
+
+      {G.pendingTrade && !showTradeOffer && (() => {
+        const pt = G.pendingTrade!
+        return (
+          <div className="overlay">
+            <div className="overlay-card">
+              <h3>Trade offer</h3>
+              <p className="trade-parties">
+                <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[pt.proposer]) } as React.CSSProperties} />{' '}
+                {PLAYER_NAMES[pt.proposer]} offers{' '}
+                <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[pt.partner]) } as React.CSSProperties} />{' '}
+                {PLAYER_NAMES[pt.partner]}
+              </p>
+              <p className="trade-terms">
+                {countsLabel(pt.give)} <span className="trade-swap">⇄</span> {countsLabel(pt.take)}
+              </p>
+              <div className="overlay-actions">
+                <button className="btn" onClick={() => move(pt.partner, (m) => m.declineTrade())}>
+                  Decline
+                </button>
+                <button className="btn btn-primary" onClick={() => move(pt.partner, (m) => m.acceptTrade())}>
+                  Accept
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {showTradeOffer && canTrade && (
+        <TradeOfferPanel
+          proposer={current}
+          hands={G.hands}
+          onPropose={(partner, give, take) => {
+            move(current, (m) => m.proposeTrade(partner, give, take))
+            setShowTradeOffer(false)
+          }}
+          onClose={() => setShowTradeOffer(false)}
         />
       )}
 

@@ -377,6 +377,106 @@ code {
   margin: 0.4em 0 0;
 }
 
+/* --- trading ------------------------------------------------------------------ */
+
+.trade-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
+}
+.trade-label {
+  width: 2.6em;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.trade-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  padding: 0.3em 0.55em;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.trade-chip:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+.trade-chip-active {
+  border-color: #7fb8ff;
+  background: rgba(127, 184, 255, 0.16);
+}
+.trade-rate {
+  font-size: 0.66rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.bank-trade-btn,
+.player-trade-btn {
+  width: 100%;
+  justify-content: center;
+}
+.bank-trade-btn {
+  margin-bottom: 0.4rem;
+}
+.trade-partners {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0.8rem;
+}
+.trade-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.trade-steppers {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+.trade-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+}
+.trade-step-label {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.trade-terms {
+  font-size: 1.25rem;
+  margin: 0.4rem 0;
+}
+.trade-swap {
+  color: var(--muted);
+}
+.trade-parties {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  flex-wrap: wrap;
+}
+.overlay-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+.trade-warn {
+  color: #e5735f;
+  margin: 0.4rem 0 0;
+}
+
 /* --- dice ----------------------------------------------------------------- */
 
 .dice-roll-btn {

@@ -6,6 +6,7 @@ import {
   CatanGame,
   SUPPLY_LIMITS,
   _internals,
+  bankTradeRate,
   createCatanGame,
   pieceCounts,
   validCityVertices,
@@ -18,7 +19,7 @@ import {
   type GameState,
 } from './catan'
 import { generateBoard, type Board } from './board'
-import { emptyResourceCounts, totalCards } from './terrain'
+import { emptyResourceCounts, RESOURCES, totalCards, type Resource, type ResourceCounts } from './terrain'
 
 // -- test client helpers --------------------------------------------------------
 
@@ -205,8 +206,10 @@ describe('CatanGame main phase', () => {
     expect(state(client).ctx.currentPlayer).toBe('0') // still player 0's turn
 
     rollUntilProducing(client, 11) // a surprise 7 is resolved on the way
+    const roller = Number(state(client).ctx.currentPlayer)
+    asPlayer(client, roller)
     client.moves.endTurn()
-    expect(state(client).ctx.currentPlayer).toBe('1')
+    expect(state(client).ctx.currentPlayer).toBe(String((roller + 1) % 4))
     expect(state(client).G.rolled).toBe(false) // reset for the new turn
   })
 
@@ -369,6 +372,7 @@ describe('vpCounts', () => {
 // -- building rules (M9) ----------------------------------------------------------
 
 const mainMoves = CatanGame.phases.main.moves
+const respondMoves = CatanGame.phases.main.turn.stages.respond.moves
 const ctx0 = { currentPlayer: '0', turn: 20, phase: 'main', activePlayers: null }
 
 /** Post-setup clone with G.rolled = true and an optional hand override for player 0. */
@@ -555,6 +559,207 @@ describe('BUILD_COSTS match PRD §5.7', () => {
     expect(BUILD_COSTS.road).toEqual({ wood: 1, brick: 1 })
     expect(BUILD_COSTS.settlement).toEqual({ wood: 1, brick: 1, grain: 1, wool: 1 })
     expect(BUILD_COSTS.city).toEqual({ grain: 2, ore: 3 })
+  })
+})
+
+// -- trading (M10) -----------------------------------------------------------------
+
+const oneOf = (r: Resource): Partial<ResourceCounts> => {
+  const c: Partial<ResourceCounts> = {}
+  c[r] = 1
+  return c
+}
+
+/** ctx with `pid` sitting in the trade-respond stage. */
+const ctxRespond = (pid: number | string) => ({
+  currentPlayer: ctx0.currentPlayer,
+  turn: ctx0.turn,
+  phase: 'main',
+  activePlayers: { [String(pid)]: 'respond' } as Record<string, string>,
+})
+
+describe('trading (M10)', () => {
+  it('bankTradeRate: 4 by default, 3 via a generic port, 2 via the matching special port', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board = generateBoard(11)
+    G.buildings = { vertices: {}, edges: {} } // no port buildings yet
+    for (const r of RESOURCES) expect(bankTradeRate(G, 0, r)).toBe(4)
+
+    const generic = board.ports.find((p) => p.kind === 'generic')!
+    G.buildings.vertices[generic.vertexIds[0]] = { player: 0, type: 'settlement' }
+    for (const r of RESOURCES) expect(bankTradeRate(G, 0, r)).toBe(3)
+
+    const woolPort = board.ports.find((p) => p.kind === 'wool')!
+    G.buildings.vertices[woolPort.vertexIds[0]] = { player: 0, type: 'settlement' }
+    expect(bankTradeRate(G, 0, 'wool')).toBe(2)
+    for (const r of RESOURCES.filter((x) => x !== 'wool')) expect(bankTradeRate(G, 0, r)).toBe(3)
+
+    // an opponent's port building gives no rate
+    G.buildings.vertices[woolPort.vertexIds[0]] = { player: 1, type: 'city' }
+    expect(bankTradeRate(G, 0, 'wool')).toBe(3)
+  })
+
+  it('tradeBank: 4:1 with the bank, conserved, and rejected when illegal', () => {
+    const G = mainG(11, [4, 0, 0, 0, 1]) // 4 wood + 1 ore
+    const before = economy(G)
+    const bankBefore = { ...G.bank }
+    expect(mainMoves.tradeBank({ G, ctx: ctx0 }, 'wood', 'brick')).toBeUndefined()
+    expect(G.hands[0]).toEqual({ wood: 0, brick: 1, grain: 0, wool: 0, ore: 1 })
+    expect(G.bank.wood).toBe(bankBefore.wood + 4)
+    expect(G.bank.brick).toBe(bankBefore.brick - 1)
+    expect(economy(G)).toBe(before)
+
+    // spent — can't afford another
+    expect(mainMoves.tradeBank({ G, ctx: ctx0 }, 'wood', 'brick')).toBe(INVALID_MOVE)
+
+    // identical-resource and empty-stack rejections
+    const G2 = mainG(11, [4, 0, 0, 0, 0])
+    expect(mainMoves.tradeBank({ G: G2, ctx: ctx0 }, 'wood', 'wood')).toBe(INVALID_MOVE)
+    G2.bank.brick = 0
+    expect(mainMoves.tradeBank({ G: G2, ctx: ctx0 }, 'wood', 'brick')).toBe(INVALID_MOVE)
+
+    // must have rolled first
+    const G3 = mainG(11, [9, 9, 9, 9, 9])
+    G3.rolled = false
+    expect(mainMoves.tradeBank({ G: G3, ctx: ctx0 }, 'wood', 'brick')).toBe(INVALID_MOVE)
+  })
+
+  it('tradeBank honors port rates (2 wool → 1 wood via the wool port)', () => {
+    const G = mainG(11, [0, 0, 0, 2, 0])
+    const woolPort = generateBoard(11).ports.find((p) => p.kind === 'wool')!
+    G.buildings.vertices[woolPort.vertexIds[0]] = { player: 0, type: 'settlement' }
+    expect(mainMoves.tradeBank({ G, ctx: ctx0 }, 'wool', 'wood')).toBeUndefined()
+    expect(G.hands[0]).toEqual({ wood: 1, brick: 0, grain: 0, wool: 0, ore: 0 })
+  })
+
+  it('proposeTrade + acceptTrade swap exactly the agreed cards', () => {
+    const G = mainG(11, [2, 1, 0, 0, 0])
+    G.hands[2] = { wood: 0, brick: 0, grain: 2, wool: 1, ore: 0 }
+    const before = economy(G)
+
+    const res = mainMoves.proposeTrade(
+      { G, ctx: ctx0, events: fakeEvents({}), playerID: '0' },
+      2,
+      { wood: 2 },
+      { grain: 1 },
+    )
+    expect(res).toBeUndefined()
+    expect(G.pendingTrade).toEqual({
+      proposer: 0,
+      partner: 2,
+      give: { wood: 2, brick: 0, grain: 0, wool: 0, ore: 0 },
+      take: { wood: 0, brick: 0, grain: 1, wool: 0, ore: 0 },
+    })
+
+    // nobody may accept outside the respond stage, and only the partner
+    expect(respondMoves.acceptTrade({ G, ctx: ctx0, playerID: '0' })).toBe(INVALID_MOVE)
+    expect(respondMoves.acceptTrade({ G, ctx: ctxRespond(2), playerID: '1' })).toBe(INVALID_MOVE)
+
+    expect(respondMoves.acceptTrade({ G, ctx: ctxRespond(2), playerID: '2' })).toBeUndefined()
+    expect(G.pendingTrade).toBeNull()
+    expect(G.hands[0]).toEqual({ wood: 0, brick: 1, grain: 1, wool: 0, ore: 0 })
+    expect(G.hands[2]).toEqual({ wood: 2, brick: 0, grain: 1, wool: 1, ore: 0 })
+    expect(economy(G)).toBe(before)
+  })
+
+  it('declineTrade leaves every hand untouched', () => {
+    const G = mainG(11, [1, 0, 0, 0, 0])
+    G.hands[1] = { wood: 0, brick: 0, grain: 0, wool: 1, ore: 0 }
+    mainMoves.proposeTrade({ G, ctx: ctx0, events: fakeEvents({}), playerID: '0' }, 1, oneOf('wood'), oneOf('wool'))
+    expect(G.pendingTrade).not.toBeNull()
+
+    expect(respondMoves.declineTrade({ G, ctx: ctxRespond(1), playerID: '1' })).toBeUndefined()
+    expect(G.pendingTrade).toBeNull()
+    expect(G.hands[0]).toEqual({ wood: 1, brick: 0, grain: 0, wool: 0, ore: 0 })
+    expect(G.hands[1]).toEqual({ wood: 0, brick: 0, grain: 0, wool: 1, ore: 0 })
+  })
+
+  it('proposeTrade validation: self/bogus partner, identical resources, short hands, empty sides', () => {
+    const G = mainG(11, [2, 0, 0, 0, 0])
+    G.hands[1] = { wood: 1, brick: 1, grain: 0, wool: 0, ore: 0 }
+    const events = fakeEvents({})
+    const propose = (partner: number, give: Partial<ResourceCounts>, take: Partial<ResourceCounts>) =>
+      mainMoves.proposeTrade({ G, ctx: ctx0, events, playerID: '0' }, partner, give, take)
+
+    expect(propose(0, oneOf('wood'), oneOf('brick'))).toBe(INVALID_MOVE) // self
+    expect(propose(9, oneOf('wood'), oneOf('brick'))).toBe(INVALID_MOVE) // bogus partner
+    expect(propose(1, oneOf('wood'), oneOf('wood'))).toBe(INVALID_MOVE) // identical resources
+    expect(propose(1, { wood: 3 }, oneOf('brick'))).toBe(INVALID_MOVE) // proposer short
+    expect(propose(1, oneOf('wood'), oneOf('grain'))).toBe(INVALID_MOVE) // partner short
+    expect(propose(1, {}, oneOf('brick'))).toBe(INVALID_MOVE) // empty give
+    expect(propose(1, oneOf('wood'), {})).toBe(INVALID_MOVE) // empty take
+    expect(G.pendingTrade).toBeNull() // nothing slipped through
+  })
+
+  it('client: a pending offer locks the turn until the partner responds', () => {
+    const client = makeClient(11)
+    runSetup(client)
+    // random 7s can shift the turn and even steal a proposer's last card, so
+    // keep rolling until the current player has a tradable pair with someone
+    let proposer = -1
+    let partner = -1
+    let give: Resource | null = null
+    let take: Resource | null = null
+    for (let guard = 0; guard < 40 && partner < 0; guard++) {
+      rollUntilProducing(client, 11)
+      const s0 = state(client)
+      proposer = Number(s0.ctx.currentPlayer)
+      outer: for (const p of [0, 1, 2, 3]) {
+        if (p === proposer) continue
+        for (const r1 of RESOURCES) {
+          if (s0.G.hands[proposer][r1] === 0) continue
+          for (const r2 of RESOURCES) {
+            if (r2 !== r1 && s0.G.hands[p][r2] > 0) {
+              partner = p
+              give = r1
+              take = r2
+              break outer
+            }
+          }
+        }
+      }
+      if (partner < 0) {
+        asPlayer(client, s0.ctx.currentPlayer)
+        client.moves.endTurn()
+      }
+    }
+    expect(partner).toBeGreaterThanOrEqual(0) // setup always leaves tradable cards
+    let s = state(client)
+
+    const handsBefore = structuredClone(s.G.hands)
+    asPlayer(client, proposer)
+    client.moves.proposeTrade(partner, oneOf(give!), oneOf(take!))
+    s = state(client)
+    expect(s.G.pendingTrade).not.toBeNull()
+    expect(s.ctx.activePlayers?.[String(partner)]).toBe('respond')
+
+    // proposer is locked while the offer stands
+    client.moves.endTurn()
+    client.moves.tradeBank(give!, take!)
+    s = state(client)
+    expect(s.ctx.currentPlayer).toBe(String(proposer))
+    expect(s.G.pendingTrade).not.toBeNull()
+
+    // a bystander can't answer
+    const bystander = [0, 1, 2, 3].find((p) => p !== proposer && p !== partner)!
+    asPlayer(client, bystander)
+    client.moves.acceptTrade()
+    expect(state(client).G.pendingTrade).not.toBeNull()
+
+    // the partner accepts → cards swap, proposer's turn continues
+    asPlayer(client, partner)
+    client.moves.acceptTrade()
+    s = state(client)
+    expect(s.G.pendingTrade).toBeNull()
+    expect(s.ctx.currentPlayer).toBe(String(proposer))
+    expect(s.G.rolled).toBe(true)
+    expect(s.G.hands[proposer][give!]).toBe(handsBefore[proposer][give!] - 1)
+    expect(s.G.hands[proposer][take!]).toBe(handsBefore[proposer][take!] + 1)
+    expect(s.G.hands[partner][give!]).toBe(handsBefore[partner][give!] + 1)
+    expect(s.G.hands[partner][take!]).toBe(handsBefore[partner][take!] - 1)
+    expect(s.G.hands.reduce((a, h) => a + totalCards(h), 0)).toBe(
+      handsBefore.reduce((a, h) => a + totalCards(h), 0),
+    )
   })
 })
 

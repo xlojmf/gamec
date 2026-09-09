@@ -76,7 +76,17 @@ export interface GameState {
   pendingDiscards: Record<number, number>
   /** Eligible steal victims while robberStep === 'steal'. */
   stealTargets: number[] | null
+  /** A domestic trade awaiting the partner's response (null = none). */
+  pendingTrade: PendingTrade | null
   log: string[]
+}
+
+/** A proposed domestic trade: proposer gives `give`, receives `take`. */
+export interface PendingTrade {
+  proposer: number
+  partner: number
+  give: ResourceCounts
+  take: ResourceCounts
 }
 
 // -- minimal boardgame.io typings (subset we actually use) -------------------
@@ -174,6 +184,29 @@ function payCost(G: GameState, player: number, cost: Partial<ResourceCounts>) {
 
 function costLabel(cost: Partial<ResourceCounts>): string {
   return RESOURCES.filter((r) => cost[r]).map((r) => `${RESOURCE_ICONS[r]}×${cost[r]}`).join('')
+}
+
+/** Human label for an arbitrary card pile, e.g. `2🪵+1🧱` (empty → `nothing`). */
+export function countsLabel(counts: Partial<ResourceCounts>): string {
+  const parts = RESOURCES.filter((r) => counts[r]).map((r) => `${counts[r]}${RESOURCE_ICONS[r]}`)
+  return parts.length > 0 ? parts.join('+') : 'nothing'
+}
+
+/**
+ * Best maritime rate for GIVING `resource`: 2 via the matching special port,
+ * 3 via any generic port, else 4 — ports need an own building on a corner.
+ */
+export function bankTradeRate(G: GameState, player: number, resource: Resource): 2 | 3 | 4 {
+  const board = boardFor(G.seed)
+  const owns = (vids: readonly string[]) =>
+    vids.some((vid) => G.buildings.vertices[vid]?.player === player)
+  for (const p of board.ports) {
+    if (p.kind !== 'generic' && p.kind === resource && owns(p.vertexIds)) return 2
+  }
+  for (const p of board.ports) {
+    if (p.kind === 'generic' && owns(p.vertexIds)) return 3
+  }
+  return 4
 }
 
 /** Distance rule: no existing building on an adjacent junction. */
@@ -468,6 +501,99 @@ function upgradeCity({ G, ctx }: MoveArgs, vertexId: VertexId) {
   pushLog(G, `${PLAYER_NAMES[player]} upgraded a city (${costLabel(BUILD_COSTS.city)})`)
 }
 
+/** Maritime trade: give `rate` of one resource for 1 of another (PRD §5.3.2). */
+function tradeBank({ G, ctx }: MoveArgs, give: Resource, take: Resource) {
+  if (!G) return INVALID
+  if (!G.rolled || G.robberStep || G.pendingTrade) return INVALID
+  if (give === take) return INVALID
+  const player = Number(ctx.currentPlayer)
+  const rate = bankTradeRate(G, player, give)
+  if (G.hands[player][give] < rate) return INVALID
+  if (G.bank[take] <= 0) return INVALID
+
+  const hand = { ...G.hands[player] }
+  const bank = { ...G.bank }
+  hand[give] -= rate
+  hand[take] += 1
+  bank[give] += rate
+  bank[take] -= 1
+  G.hands[player] = hand
+  G.bank = bank
+  const via = rate === 4 ? ' with the bank' : rate === 3 ? ' via a 3:1 port' : ' via a 2:1 port'
+  pushLog(G, `${PLAYER_NAMES[player]} traded ${rate}${RESOURCE_ICONS[give]} for 1${RESOURCE_ICONS[take]}${via}`)
+}
+
+function proposeTrade(
+  { G, ctx, events }: MoveArgs,
+  partnerId: number,
+  give: Partial<ResourceCounts>,
+  take: Partial<ResourceCounts>,
+) {
+  if (!G) return INVALID
+  if (!G.rolled || G.robberStep || G.pendingTrade) return INVALID
+  const proposer = Number(ctx.currentPlayer)
+  if (partnerId === proposer || partnerId < 0 || partnerId >= G.hands.length) return INVALID
+
+  const normGive = emptyResourceCounts()
+  const normTake = emptyResourceCounts()
+  let giveTotal = 0
+  let takeTotal = 0
+  for (const r of RESOURCES) {
+    const g = give[r] ?? 0
+    const t = take[r] ?? 0
+    if (g < 0 || t < 0) return INVALID
+    if (g > 0 && t > 0) return INVALID // may not trade identical resources
+    if (g > G.hands[proposer][r] || t > G.hands[partnerId][r]) return INVALID
+    normGive[r] = g
+    normTake[r] = t
+    giveTotal += g
+    takeTotal += t
+  }
+  if (giveTotal < 1 || takeTotal < 1) return INVALID
+
+  G.pendingTrade = { proposer, partner: partnerId, give: normGive, take: normTake }
+  pushLog(
+    G,
+    `${PLAYER_NAMES[proposer]} offers ${PLAYER_NAMES[partnerId]}: ${countsLabel(normGive)} for ${countsLabel(normTake)}`,
+  )
+  events?.setActivePlayers({ value: { [String(partnerId)]: { stage: 'respond' } } })
+}
+
+function acceptTrade({ G, ctx, playerID, events }: MoveArgs) {
+  if (!G) return INVALID
+  const t = G.pendingTrade
+  if (!t) return INVALID
+  if (ctx.activePlayers?.[playerID as string] !== 'respond') return INVALID
+  if (Number(playerID) !== t.partner) return INVALID
+
+  const proposerHand = { ...G.hands[t.proposer] }
+  const partnerHand = { ...G.hands[t.partner] }
+  for (const r of RESOURCES) {
+    if (proposerHand[r] < t.give[r] || partnerHand[r] < t.take[r]) return INVALID
+    proposerHand[r] += t.take[r] - t.give[r]
+    partnerHand[r] += t.give[r] - t.take[r]
+  }
+  G.hands[t.proposer] = proposerHand
+  G.hands[t.partner] = partnerHand
+  G.pendingTrade = null
+  pushLog(
+    G,
+    `${PLAYER_NAMES[t.partner]} accepted ${countsLabel(t.give)} ⇄ ${countsLabel(t.take)} from ${PLAYER_NAMES[t.proposer]}`,
+  )
+  events?.endStage()
+}
+
+function declineTrade({ G, ctx, playerID, events }: MoveArgs) {
+  if (!G) return INVALID
+  const t = G.pendingTrade
+  if (!t) return INVALID
+  if (ctx.activePlayers?.[playerID as string] !== 'respond') return INVALID
+  if (Number(playerID) !== t.partner) return INVALID
+  G.pendingTrade = null
+  pushLog(G, `${PLAYER_NAMES[t.partner]} declined the trade`)
+  events?.endStage()
+}
+
 function endTurn({ G, events }: MoveArgs) {
   if (!G) return INVALID
   if (!G.rolled || G.robberStep) return INVALID
@@ -512,6 +638,7 @@ export const CatanGame = {
       robberStep: null,
       pendingDiscards: {},
       stealTargets: null,
+      pendingTrade: null,
       log: [],
     }
   },
@@ -533,13 +660,15 @@ export const CatanGame = {
           G.robberStep = null
           G.stealTargets = null
           G.pendingDiscards = {}
+          G.pendingTrade = null
           return G
         },
         stages: {
           discard: { moves: { discardHalf } },
+          respond: { moves: { acceptTrade, declineTrade } },
         },
       },
-      moves: { roll, moveRobber, steal, placeSettlement, placeRoad, upgradeCity, endTurn },
+      moves: { roll, moveRobber, steal, placeSettlement, placeRoad, upgradeCity, tradeBank, proposeTrade, endTurn },
     },
   },
 
