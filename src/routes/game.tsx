@@ -17,8 +17,11 @@ import { randomSeed } from '#/game/rng'
 import { isRobberRoll, type DiceRoll } from '#/game/dice'
 import {
   BUILD_COSTS,
+  DEV_CARD_INFO,
+  DEV_COST,
   SUPPLY_LIMITS,
   bankTradeRate,
+  connectedRoadEdges,
   countsLabel,
   createCatanGame,
   pieceCounts,
@@ -289,6 +292,54 @@ function TradeOfferPanel({
   )
 }
 
+/** Year of Plenty picker: choose 2 resources from the bank (may be the same). */
+function YearOfPlentyPanel({
+  bank,
+  onTake,
+}: {
+  bank: ResourceCounts
+  onTake: (r1: Resource, r2: Resource) => void
+}) {
+  const [r1, setR1] = useState<Resource | null>(null)
+  const [r2, setR2] = useState<Resource | null>(null)
+  const ok = r1 && r2 && (r1 !== r2 ? bank[r1] >= 1 && bank[r2] >= 1 : bank[r1] >= 2)
+  return (
+    <div className="overlay">
+      <div className="overlay-card">
+        <h3>💰 Year of Plenty</h3>
+        <p className="muted small">take any 2 resources from the bank (they may match)</p>
+        {([1, 2] as const).map((n) => (
+          <div key={n} className="trade-row">
+            <span className="trade-label">take {n}</span>
+            {RESOURCES.map((r) => {
+              const picked = n === 1 ? r1 : r2
+              const set = n === 1 ? setR1 : setR2
+              const other = n === 1 ? r2 : r1
+              // picking the same resource twice needs a stack of 2
+              const disabled = bank[r] < (other === r ? 2 : 1)
+              return (
+                <button
+                  key={r}
+                  className={`trade-chip ${picked === r ? 'trade-chip-active' : ''}`}
+                  disabled={disabled}
+                  onClick={() => set(picked === r ? null : r)}
+                >
+                  {RESOURCE_ICONS[r]} <span className="trade-rate">{bank[r]}</span>
+                </button>
+              )
+            })}
+          </div>
+        ))}
+        <div className="overlay-actions">
+          <button className="btn btn-primary" disabled={!ok} onClick={() => ok && onTake(r1!, r2!)}>
+            Take {r1 ? RESOURCE_ICONS[r1] : '?'} + {r2 ? RESOURCE_ICONS[r2] : '?'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function GamePage() {
   const [seed, setSeed] = useState(() => randomSeed())
   const { state, move } = useCatanClient(seed)
@@ -303,6 +354,8 @@ function GamePage() {
   const [bankGive, setBankGive] = useState<Resource | null>(null)
   const [bankTake, setBankTake] = useState<Resource | null>(null)
   const [showTradeOffer, setShowTradeOffer] = useState(false)
+  /** index of the monopoly card being played (picker open), else null */
+  const [monoPick, setMonoPick] = useState<number | null>(null)
 
   const G = state?.G
   const ctx = state?.ctx
@@ -354,6 +407,7 @@ function GamePage() {
     setBankGive(null)
     setBankTake(null)
     setShowTradeOffer(false)
+    setMonoPick(null)
     lastNonce.current = null
   }
 
@@ -377,6 +431,10 @@ function GamePage() {
       }
       // main phase: build as the active player (engine validates cost/legality)
       if (phase === 'main' && G.rolled && !G.robberStep) {
+        if (target.kind === 'edge' && G.devStep === 'roadBuilding') {
+          move(current, (m) => m.placeFreeRoad(target.id))
+          return
+        }
         if (target.kind === 'vertex' && kind === 'settlement') move(current, (m) => m.placeSettlement(target.id))
         if (target.kind === 'vertex' && kind === 'city') move(current, (m) => m.upgradeCity(target.id))
         if (target.kind === 'edge' && kind === 'road') move(current, (m) => m.placeRoad(target.id))
@@ -401,6 +459,9 @@ function GamePage() {
         : { kind: 'settlement', player: current, allowedVertices: new Set(validSetupVertices(G)) }
     }
     if (!G || phase !== 'main' || !G.rolled || G.robberStep) return { kind: null, player: current }
+    // Road Building effect: ghosts for the free roads (no cost check)
+    if (G.devStep === 'roadBuilding')
+      return { kind: 'road', player: current, allowedEdges: new Set(connectedRoadEdges(G, current)) }
     if (kind === 'road') return { kind, player: current, allowedEdges: new Set(validRoadEdges(G, current)) }
     if (kind === 'settlement')
       return { kind, player: current, allowedVertices: new Set(validSettlementVertices(G, current)) }
@@ -434,9 +495,13 @@ function GamePage() {
             ? `${PLAYER_NAMES[current]} — choose a victim to rob`
             : G.pendingTrade
               ? `${PLAYER_NAMES[G.pendingTrade.partner]} — respond to ${PLAYER_NAMES[G.pendingTrade.proposer]}'s trade offer`
-              : !G.rolled
-                ? `${PLAYER_NAMES[current]} — roll the dice`
-                : `${PLAYER_NAMES[current]} — trade & build`
+              : G.devStep === 'roadBuilding'
+                ? `${PLAYER_NAMES[current]} — place free roads (${G.roadBuildingLeft} left, or end turn)`
+                : G.devStep === 'yearOfPlenty'
+                  ? `${PLAYER_NAMES[current]} — choose 2 resources`
+                  : !G.rolled
+                    ? `${PLAYER_NAMES[current]} — roll the dice`
+                    : `${PLAYER_NAMES[current]} — trade & build`
 
   const terrainCounts = TERRAIN_LEGEND
 
@@ -623,6 +688,15 @@ function GamePage() {
                 <span>🏙 City</span>
                 <CostTag cost={BUILD_COSTS.city} hand={G.hands[current]} />
               </button>
+              <button
+                className="btn"
+                disabled={!canBuild || !!G.devStep || G.devDeck.length === 0}
+                title={G.devDeck.length === 0 ? 'the deck is empty' : 'draw from the development deck'}
+                onClick={() => move(current, (m) => m.buyDevCard())}
+              >
+                <span>🃏 Dev card</span>
+                <CostTag cost={DEV_COST} hand={G.hands[current]} />
+              </button>
             </div>
             <p className="muted small supply-line">
               supply: 🛣 {SUPPLY_LIMITS.road - supply.road} · 🏠 {SUPPLY_LIMITS.settlement - supply.settlement} · 🏙{' '}
@@ -635,6 +709,64 @@ function GamePage() {
               {canBuild
                 ? 'Glowing spots are legal — costs are paid to the bank.'
                 : 'Roll the dice first; build afterwards.'}
+            </p>
+          </>
+        )}
+
+        {phase === 'main' && (
+          <>
+            <h3>Development</h3>
+            <p className="muted small">
+              deck {G.devDeck.length}/25 · 🏅{' '}
+              {G.longestRoad
+                ? `${PLAYER_NAMES[G.longestRoad.player]} ${G.longestRoad.size}`
+                : '—'}{' '}
+              · ⚔{' '}
+              {G.largestArmy ? `${PLAYER_NAMES[G.largestArmy.player]} ${G.largestArmy.size}` : '—'}
+            </p>
+            {G.devHands[current].length === 0 ? (
+              <p className="muted small">no cards in hand</p>
+            ) : (
+              <div className="dev-hand">
+                {G.devHands[current].map((entry, i) => {
+                  const info = DEV_CARD_INFO[entry.card]
+                  const fresh = entry.boughtTurn === ctx.turn
+                  const playable =
+                    canBuild &&
+                    !G.devStep &&
+                    !G.robberStep &&
+                    !G.pendingTrade &&
+                    G.devPlayedAtTurn !== ctx.turn &&
+                    !fresh &&
+                    entry.card !== 'victoryPoint'
+                  return (
+                    <div key={i} className="dev-card-row" title={info.hint}>
+                      <span className="dev-card-name">
+                        {info.icon} {info.label}
+                        {fresh && <span className="muted small"> ·new</span>}
+                      </span>
+                      {entry.card === 'victoryPoint' ? (
+                        <span className="muted small">+1 VP</span>
+                      ) : entry.card === 'monopoly' ? (
+                        <button className="btn btn-small" disabled={!playable} onClick={() => setMonoPick(i)}>
+                          Play
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-small"
+                          disabled={!playable}
+                          onClick={() => move(current, (m) => m.playDevCard(i))}
+                        >
+                          Play
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <p className="muted small dev-knights">
+              knights: {G.playedKnights.map((n, p) => `${PLAYER_NAMES[p]} ${n}`).join(' · ')}
             </p>
           </>
         )}
@@ -728,6 +860,41 @@ function GamePage() {
             setShowTradeOffer(false)
           }}
           onClose={() => setShowTradeOffer(false)}
+        />
+      )}
+
+      {monoPick !== null && !G.devStep && (
+        <div className="overlay">
+          <div className="overlay-card">
+            <h3>👑 Monopoly — name a resource</h3>
+            <p className="muted small">every other player hands over all their cards of it</p>
+            <div className="trade-partners">
+              {RESOURCES.map((r) => (
+                <button
+                  key={r}
+                  className="trade-chip"
+                  onClick={() => {
+                    move(current, (m) => m.playDevCard(monoPick, r))
+                    setMonoPick(null)
+                  }}
+                >
+                  {RESOURCE_ICONS[r]} {RESOURCE_LABELS[r]}
+                </button>
+              ))}
+            </div>
+            <div className="overlay-actions">
+              <button className="btn" onClick={() => setMonoPick(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {G.devStep === 'yearOfPlenty' && !G.robberStep && (
+        <YearOfPlentyPanel
+          bank={G.bank}
+          onTake={(r1, r2) => move(current, (m) => m.takeYearOfPlenty(r1, r2))}
         />
       )}
 

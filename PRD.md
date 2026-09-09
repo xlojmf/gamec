@@ -210,8 +210,8 @@ Mapped 1:1 to the incremental build plan. Each milestone ships green (typecheck 
 | M8 | Player turns | boardgame.io local client; setup snake draft; turn phases; robber resolution; discard flow | Full hotseat game runs from setup to 10 VP with rules above | ✅ |
 | M9 | Building rules | Costs, supply limits, connectivity, distance rule, road-cutting | Illegal builds impossible; costs exact per §5.7 | ✅ |
 | M10 | Trading | Bank 4:1, ports 3:1 & 2:1, player-to-player trade offers | Trades validated per §5.3.2 | ✅ |
-| M11 | Development cards | Deck, play restrictions, Largest Army / Longest Road, VP win check | Dev cards fully functional; awards transfer correctly | ⏳ next |
-| M12 | Multiplayer | boardgame.io server in compose, lobby/join codes, hidden hands, reconnect | 2+ browsers play one authoritative game; refresh reconnects | ⏳ |
+| M11 | Development cards | Deck, play restrictions, Largest Army / Longest Road, VP win check | Dev cards fully functional; awards transfer correctly | ✅ |
+| M12 | Multiplayer | boardgame.io server in compose, lobby/join codes, hidden hands, reconnect | 2+ browsers play one authoritative game; refresh reconnects | ⏳ next |
 
 ### Art track (parallel, GPT Astra)
 | # | Pass | Output |

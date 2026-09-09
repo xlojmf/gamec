@@ -1,11 +1,11 @@
 # Handoff — resume here
 
 **Project:** Catan 3D — unofficial fan re-implementation, TanStack Start + Three.js + boardgame.io.
-**PRD:** [`PRD.md`](./PRD.md) (§5 = rules contract, §6 = milestone table). **Status tracker:** `src/data/milestones.ts` (keep in sync with PRD + README).
+**PRD:** [`PRD.md`](./PRD.md) (§5 = rules contract, §6 = milestones, §7 = multiplayer design). **Status tracker:** `src/data/milestones.ts` (keep in sync with PRD + README).
 
 ## Where we are
 
-M0–M10 done, committed, all green (typecheck ✅ · 52/52 tests ✅ · build ✅ · dev+Docker smoke ✅):
+M0–M11 done, committed, all green (typecheck ✅ · 70/70 tests ✅ · build ✅ · dev smoke ✅):
 
 | Milestone | Commit |
 |---|---|
@@ -15,52 +15,54 @@ M0–M10 done, committed, all green (typecheck ✅ · 52/52 tests ✅ · build �
 | M8 player turns (boardgame.io engine, hotseat) | `0434064` |
 | M9 building rules (costs, supply, connectivity, upgradeCity) | `0ac2ea6` |
 | M10 trading (bank/ports, domestic propose-accept) | `48a7931` |
+| M11 dev cards & awards | *(this session — see `git log`)* |
 
-The game currently plays the full base game minus dev cards: snake-draft setup → roll/produce → trade (maritime 4:1/3:1/2:1 + domestic with accept/decline overlay) → build with full rules → 7 flow → 10 VP win.
+The hotseat game is the **complete base game**: setup draft → roll/produce → trade (maritime + domestic) → build with full rules → dev cards (Knight/Road Building/Year of Plenty/Monopoly/VP) → Longest Road & Largest Army → 10 VP win.
 
-## Next up: M11 — Development cards & awards
+## Next up: M12 — Multiplayer
 
-PRD §5.4 + §5.5 are the contract. Scope:
+PRD §7 is the contract (diagram at the top of that section). Scope:
 
-1. **Deck** — 14 Knights, 2 Road Building, 2 Year of Plenty, 2 Monopoly, 5 VP cards (25 total). Keep the remaining order as a plain string array in G (JSON-serializable). Deterministic initial shuffle from `G.seed` via `mulberry32`/`shuffled` from `src/game/rng.ts` — avoids ctx.random entirely (see rng gotcha below).
-2. **`buyDevCard`** move — cost ⛏+🐑+🌾 (the purchase deferred from M9); draws the top card into `G.devHands[player]` as `{ card, boughtTurn: ctx.turn }`. Bank interaction: cards are paid to the bank like builds.
-3. **Play restrictions** — at most 1 dev card per turn; never the card bought this turn (VP cards are the exception: may be revealed immediately if it wins). Track via a `G.devPlayedAtTurn` stamp.
-4. **Effects**: Knight (reuse the robber flow — knight play = `beginRobberFlow`-style move+steal without the discard step); Road Building (2 free roads, normal placement rules — reuse `validRoadEdges`); Year of Plenty (any 2 resources from bank, may be same, respect empty stacks); Monopoly (name a resource, every other player hands over all of it).
-5. **Awards**: Largest Army (3+ played knights, 2 VP, stolen when exceeded) and Longest Road (≥5 segments, 2 VP, stolen when exceeded). Put the road-path algorithm in a new pure `src/game/awards.ts` — DFS over own edges where junctions with opponent buildings sever the path (`connectsThrough` in catan.ts is the building block; consider exporting it). Store award holders in G; recompute after builds/upgrades/knights.
-6. **VP win check** — `endIf`/`vpCounts` must include awards (2 each) + revealed VP cards. Note: VP cards stay hidden until revealed; in hotseat the HUD shows them, but keep the G shape ready for M12 hidden state.
-7. **UI**: Dev card buy button in the Build row (cost tag), per-player dev hand panel (card names + play buttons), knight play reuses the existing robber move mode, log lines for draws keep the card secret ("Red drew a development card").
+1. **bgio server** as a compose `game` service (`src/server/gameServer.ts` + `Dockerfile` + compose entry, ws on 8000, healthcheck). `Server({ games: [CatanGame] })` — the `setup(ctx, setupData)` path already honors `setupData.seed` for exactly this.
+2. **Lobby/join flow** — landing page (`/`) gets "create room" (server picks/randomizes the seed) and "join code" entry. boardgame.io's lobby API (`lobbyClient.createMatch('catan-3d', { numPlayers: 4, setupData: { seed } })`) or a thin custom REST route on the game server. Keep room codes short (PRD open question: 4 vs 6 chars).
+3. **Client switch** — `useCatanClient` gains a multiplayer mode: `Client({ game, playerID, matchID, multiplayer: SocketMaster('ws://host:8000') })`. Hotseat stays available (route query flag `/game?hotseat=1`).
+4. **Hidden information** — hands of other players must not be sent in full: use bgio's `playerView`/secret state (strip other `hands`/`devHands` to counts) and re-derive the HUD from `G` counts + own hand. The G shape is already prepared (dev VP cards were kept countable for this).
+5. **Reconnect** — bgio match IDs + player credentials in `sessionStorage`; refresh resumes (PRD acceptance: "refresh reconnects").
+6. **Seats UI** — join as Red/Blue/…, show which seat you occupy; observer mode optional.
+7. Docker: `docker compose up` runs `web` + `game`; CORS for the ws origin.
 
-Files to touch: `src/game/catan.ts`, new `src/game/awards.ts`, `src/game/catan.test.ts` (+ `awards.test.ts`), `src/routes/game.tsx`, `src/styles.css`.
+Files to touch: new `src/server/*`, `docker-compose.yml`, `src/routes/index.tsx` (lobby), `src/routes/game.tsx` (multiplayer mode + hidden-hands HUD), maybe `src/game/catan.ts` (`playerView` — pure, testable).
 
 ## boardgame.io 0.50 gotchas (learned the hard way — read before touching the engine)
 
-- **Local `Client` does NOT forward `setupData`** → use `createCatanGame(seed)` factory (already in `catan.ts`). The `setup(ctx, setupData)` path still exists for the M12 server.
+- **Local `Client` does NOT forward `setupData`** → hotseat uses the `createCatanGame(seed)` factory. The server/multiplayer path DOES forward it — that's the M12 path.
 - `INVALID_MOVE` is the **string** `'INVALID_MOVE'` from `boardgame.io/core` — not a Symbol.
 - Triggers (`endIf`, phase `next`, order `first`/`next`) receive `{ G, ctx }`; **hooks (`onBegin` etc.) must return G** or state becomes undefined.
 - Phase `endIf` is evaluated **at turn end** — a move must call `events.endTurn()` for it to fire.
 - `events`/`random`/`playerID` are **separate move args**, not on `ctx`.
 - **Rejected moves still advance the seeded rng** — tests that roll "until 7" see different sequences depending on prior rejected dispatches.
 - bgio state is immer-frozen → in tests `structuredClone(state.G)` before mutating (see `fakeG` / `mainG`).
-- **The `seed` client option does NOT make the 0.50 local client's rng deterministic** — rolls are effectively Math.random-backed and a "guaranteed non-7" roll can still come up 7. Tests must tolerate surprise 7s: use `rollUntilProducing(client, seed)` (resolves discard/move/steal and re-rolls) instead of asserting on one roll. Consequence: **it may end turns internally** — always assert relative to the *actual* current player after calling it, never hard-code `'0'`/`'1'`. The `seed` option is also untyped — cast as in `makeClient`. (For real determinism, derive from `mulberry32(seed)` in setup instead — do this for the dev deck.)
+- **The `seed` client option does NOT make the 0.50 local client's rng deterministic** — rolls are effectively Math.random-backed and a "guaranteed non-7" roll can still come up 7. Tests must tolerate surprise 7s: use `rollUntilProducing(client, seed)` (resolves discard/move/steal and re-rolls) instead of asserting on one roll. Consequence: **it may end turns internally** — always assert relative to the *actual* current player after calling it, never hard-code `'0'`/`'1'`. For real determinism derive from `mulberry32(seed)` in setup (the dev deck does this via `makeDevDeck`).
 - Main phase turn order is a custom `mainOrder` (CONTINUE-style) so player 0 — the last setup placer — takes the first turn.
-- **Unit-testing moves without a client**: `CatanGame.phases.main.moves.X({ G, ctx }, args)` works on a `structuredClone`d G + plain ctx (see `mainG`/`ctx0` in `catan.test.ts`) — precise, deterministic, no rng drift. Stage moves live at `CatanGame.phases.main.turn.stages.<stage>.moves` (see `respondMoves`).
+- **Unit-testing moves without a client**: `CatanGame.phases.main.moves.X({ G, ctx }, args)` works on a `structuredClone`d G + plain ctx (see `mainG`/`ctx0` in `catan.test.ts`) — precise, deterministic, no rng drift. Stage moves live at `CatanGame.phases.main.turn.stages.<stage>.moves` (see `respondMoves`). Fake `random` via `{ Die: () => 1 }`.
 - **`setActivePlayers({ value })` locks the current player out of ALL moves** until every stage player calls `events.endStage()` — used by the trade `respond` stage (and the `discard` stage) to block the turn while someone else must act.
 
 ## Architecture rules (unchanged)
 
-- `src/game/*` = pure, no framework imports, Maps allowed *outside* bgio state; **G stays JSON-serializable** (buildings are `Record`s, never Maps). Board is regenerated from `G.seed` via `boardFor()` (cached).
-- Build validators (`validRoadEdges` / `validSettlementVertices` / `validCityVertices`) include **affordability + supply + geometry** — single source of truth for moves and UI ghost sets. Trade rate logic likewise lives in `bankTradeRate(G, player, resource)`.
-- `src/three/GameView.ts` is the only file that touches Three.js; React ↔ it via `GameCanvas` imperative props (`roll`, `production`, `robberMode`, `robberTileId` all nonce/identity-driven effects). Ghosts can be constrained per-mode via `BuildMode.allowedVertices/allowedEdges` (Sets); city ghosts float above the settlement they'd upgrade.
+- `src/game/*` = pure, no framework imports, Maps allowed *outside* bgio state; **G stays JSON-serializable** (buildings are `Record`s, never Maps). Board is regenerated from `G.seed` via `boardFor()` (cached). Dev deck order is derived from the seed (`makeDevDeck`), never stored randomness beyond the array itself.
+- Validators are the single source of truth for legality (moves + UI ghosts): `validRoadEdges`/`validSettlementVertices`/`validCityVertices` (paid builds), `connectedRoadEdges` (Road Building's free roads), `bankTradeRate` (ports). Awards live in `src/game/awards.ts` (`longestRoadLength` DFS with opponent-junction cutting, `claimAward` transfer rules) and are recomputed by `updateAwards` after every board/knight-changing move.
+- VP = settlements/cities + VP dev cards (counted immediately, PRD §5.6) + 2 per award — all inside `vpCounts`, so `endIf` needs no changes.
+- `src/three/GameView.ts` is the only file that touches Three.js; React ↔ it via `GameCanvas` imperative props (`roll`, `production`, `robberMode`, `robberTileId` all nonce/identity-driven effects). Ghosts are constrained per-mode via `BuildMode.allowedVertices/allowedEdges`; city ghosts float above the settlement they'd upgrade.
 - **No hooks after the `if (!G || !ctx) return` early return in `GamePage`** — the first render has `state === null`, so any hook below it changes the hook count between renders and crashes React (bit us once: a stray `useMemo` for the static island legend; static data belongs at module scope).
-- Dice/robber visuals: `rollDice()` animates then fires `onRollDone`; production pulses via `showProduction(tileIds)`; robber hop via `setRobberTile`.
+- Don't leave `npm run dev` running unattended across sessions — a stray dev process once clobbered `src/routes/game.tsx` back to the route scaffold (git restore + re-apply if that happens again).
 
 ## Morning checklist
 
 ```bash
 cd /c/catan
-npm run typecheck && npm test        # expect 52/52
-npm run dev                          # → http://localhost:3000/game
-# docker: docker compose up --build  # → http://localhost:3000
+npm run typecheck && npm test        # expect 70/70
+npm run dev                          # → http://localhost:3000/game (hotseat)
+# docker: docker compose up --build  # → http://localhost:3000 (+ game service from M12)
 ```
 
-Then start M11 (above). After M11: M12 multiplayer (bgio server as compose `game` service, PRD §7), art track A1–A3 in parallel.
+Then start M12 (above). After M12: polish + art track A1–A3 (GPT Astra textures via the manifest slots in `public/assets/astra/`), then v1.

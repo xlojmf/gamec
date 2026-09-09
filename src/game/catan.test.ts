@@ -4,10 +4,15 @@ import { INVALID_MOVE } from 'boardgame.io/core'
 import {
   BUILD_COSTS,
   CatanGame,
+  DEV_CARD_INFO,
+  DEV_DECK_COMPOSITION,
+  DEV_COST,
   SUPPLY_LIMITS,
   _internals,
   bankTradeRate,
+  connectedRoadEdges,
   createCatanGame,
+  makeDevDeck,
   pieceCounts,
   validCityVertices,
   validRoadEdges,
@@ -16,6 +21,7 @@ import {
   validSettlementVertices,
   vpCounts,
   type BgioState,
+  type DevCardType,
   type GameState,
 } from './catan'
 import { generateBoard, type Board } from './board'
@@ -559,6 +565,236 @@ describe('BUILD_COSTS match PRD §5.7', () => {
     expect(BUILD_COSTS.road).toEqual({ wood: 1, brick: 1 })
     expect(BUILD_COSTS.settlement).toEqual({ wood: 1, brick: 1, grain: 1, wool: 1 })
     expect(BUILD_COSTS.city).toEqual({ grain: 2, ore: 3 })
+    expect(DEV_COST).toEqual({ wool: 1, grain: 1, ore: 1 })
+  })
+})
+
+// -- development cards & awards (M11) -----------------------------------------------
+
+const fakeRandom = { Die: () => 1 }
+const ctxAt = (turn: number) => ({ ...ctx0, turn })
+
+function giveDev(G: GameState, player: number, card: DevCardType, boughtTurn = 0) {
+  G.devHands[player] = [...G.devHands[player], { card, boughtTurn }]
+}
+
+describe('dev deck', () => {
+  it('has the official 14/2/2/2/5 composition and is deterministic per seed', () => {
+    const count = (deck: DevCardType[], card: DevCardType) => deck.filter((c) => c === card).length
+    for (const seed of [1, 7, 11, 42]) {
+      const deck = makeDevDeck(seed)
+      expect(deck.length).toBe(25)
+      expect(DEV_DECK_COMPOSITION.map(([c, n]) => count(deck, c) === n).every(Boolean)).toBe(true)
+      expect(deck).toEqual(makeDevDeck(seed))
+    }
+    expect(makeDevDeck(1)).not.toEqual(makeDevDeck(2))
+  })
+})
+
+describe('development cards (M11)', () => {
+  it('buyDevCard pays ⛏🐑🌾, draws the top card, and keeps the draw secret-ish in the log', () => {
+    const G = mainG(11, [0, 0, 1, 1, 1])
+    G.devDeck = ['victoryPoint', 'knight']
+    const before = economy(G)
+    expect(mainMoves.buyDevCard({ G, ctx: ctx0 })).toBeUndefined()
+    expect(G.devDeck).toEqual(['knight'])
+    expect(G.devHands[0]).toEqual([{ card: 'victoryPoint', boughtTurn: ctx0.turn }])
+    expect(G.hands[0]).toEqual({ wood: 0, brick: 0, grain: 0, wool: 0, ore: 0 })
+    expect(economy(G)).toBe(before)
+    expect(G.log[0]).toContain('bought a development card')
+
+    const G2 = mainG(11, [0, 0, 0, 0, 0]) // can't afford
+    expect(mainMoves.buyDevCard({ G: G2, ctx: ctx0 })).toBe(INVALID_MOVE)
+    const G3 = mainG(11, [9, 9, 9, 9, 9])
+    G3.devDeck = []
+    expect(mainMoves.buyDevCard({ G: G3, ctx: ctx0 })).toBe(INVALID_MOVE)
+    const G4 = mainG(11, [0, 0, 1, 1, 1])
+    G4.rolled = false
+    expect(mainMoves.buyDevCard({ G: G4, ctx: ctx0 })).toBe(INVALID_MOVE)
+  })
+
+  it('play restrictions: not this turn\'s card, one per turn, never VP cards, after the roll', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    G.devHands[0] = [{ card: 'knight', boughtTurn: ctx0.turn }] // bought this turn
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBe(INVALID_MOVE)
+
+    G.devHands[0] = [{ card: 'victoryPoint', boughtTurn: 0 }]
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBe(INVALID_MOVE) // VPs count, never played
+
+    G.devHands[0] = [{ card: 'knight', boughtTurn: 0 }]
+    G.rolled = false
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBe(INVALID_MOVE)
+
+    G.rolled = true
+    const board = generateBoard(11)
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBeUndefined()
+    expect(G.devPlayedAtTurn).toBe(ctx0.turn)
+    mainMoves.moveRobber({ G, ctx: ctx0, random: fakeRandom }, board.tiles.find((t) => t.id !== G.robberTileId)!.id)
+    if (G.robberStep === 'steal') mainMoves.steal({ G, ctx: ctx0, random: fakeRandom }, G.stealTargets![0])
+
+    giveDev(G, 0, 'monopoly') // a second card this turn is illegal
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, G.devHands[0].length - 1, 'wood')).toBe(INVALID_MOVE)
+  })
+
+  it('knight: robber flow without discards, knights count toward Largest Army', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board = generateBoard(11)
+    for (let k = 1; k <= 3; k++) {
+      giveDev(G, 0, 'knight')
+      const ctx = ctxAt(ctx0.turn + k)
+      expect(mainMoves.playDevCard({ G, ctx }, G.devHands[0].length - 1)).toBeUndefined()
+      expect(G.robberStep).toBe('move') // no discard step for knights
+      expect(G.pendingDiscards).toEqual({})
+      mainMoves.moveRobber({ G, ctx, random: fakeRandom }, board.tiles.find((t) => t.id !== G.robberTileId)!.id)
+      if (G.robberStep === 'steal') mainMoves.steal({ G, ctx, random: fakeRandom }, G.stealTargets![0])
+      expect(G.robberStep).toBeNull()
+      expect(G.playedKnights[0]).toBe(k)
+    }
+    expect(G.largestArmy).toEqual({ player: 0, size: 3 })
+    expect(vpCounts(G)[0]).toBe(2 + 2) // 2 setup settlements + Largest Army
+  })
+
+  it('road building: two free roads with normal placement rules, no cost', () => {
+    const G = mainG(11, [0, 0, 0, 0, 0]) // deliberately broke — roads must be free
+    giveDev(G, 0, 'roadBuilding')
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBeUndefined()
+    expect(G.devStep).toBe('roadBuilding')
+    expect(G.roadBuildingLeft).toBe(2)
+
+    const e1 = connectedRoadEdges(G, 0)[0]
+    expect(mainMoves.placeFreeRoad({ G, ctx: ctx0 }, e1)).toBeUndefined()
+    expect(G.buildings.edges[e1]).toEqual({ player: 0 })
+    expect(totalCards(G.hands[0])).toBe(0) // nothing paid
+
+    const far = generateBoard(11).edges.find(
+      (e) => !G.buildings.edges[e.id] && !connectedRoadEdges(G, 0).includes(e.id),
+    )!
+    expect(mainMoves.placeFreeRoad({ G, ctx: ctx0 }, far.id)).toBe(INVALID_MOVE)
+
+    const e2 = connectedRoadEdges(G, 0)[0]
+    expect(mainMoves.placeFreeRoad({ G, ctx: ctx0 }, e2)).toBeUndefined()
+    expect(G.devStep).toBeNull() // auto-clears after the second road
+    expect(G.roadBuildingLeft).toBe(0)
+  })
+
+  it('year of plenty: take any 2 from the bank, empty stacks respected', () => {
+    const G = mainG(11, [0, 0, 0, 0, 0])
+    giveDev(G, 0, 'yearOfPlenty')
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBeUndefined()
+    expect(G.devStep).toBe('yearOfPlenty')
+
+    const before = economy(G)
+    expect(mainMoves.takeYearOfPlenty({ G, ctx: ctx0 }, 'wood', 'wood')).toBeUndefined()
+    expect(G.hands[0]).toEqual({ wood: 2, brick: 0, grain: 0, wool: 0, ore: 0 })
+    expect(G.devStep).toBeNull()
+    expect(economy(G)).toBe(before)
+
+    const G2 = mainG(11, [0, 0, 0, 0, 0])
+    giveDev(G2, 0, 'yearOfPlenty')
+    mainMoves.playDevCard({ G: G2, ctx: ctx0 }, 0)
+    G2.bank.ore = 1
+    expect(mainMoves.takeYearOfPlenty({ G: G2, ctx: ctx0 }, 'ore', 'ore')).toBe(INVALID_MOVE)
+    expect(mainMoves.takeYearOfPlenty({ G: G2, ctx: ctx0 }, 'ore', 'wood')).toBeUndefined() // 1+1 fits
+    expect(G2.hands[0]).toEqual({ wood: 1, brick: 0, grain: 0, wool: 0, ore: 1 })
+  })
+
+  it('monopoly: every other player hands over all cards of the named resource', () => {
+    const G = mainG(11, [0, 0, 0, 0, 0])
+    G.hands[1] = { wood: 2, brick: 1, grain: 0, wool: 0, ore: 0 }
+    G.hands[2] = { wood: 1, brick: 0, grain: 3, wool: 0, ore: 0 }
+    G.hands[3] = { wood: 0, brick: 0, grain: 0, wool: 5, ore: 0 }
+    giveDev(G, 0, 'monopoly')
+    const before = economy(G)
+
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBe(INVALID_MOVE) // resource required
+    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0, 'wood')).toBeUndefined()
+    expect(G.hands[0].wood).toBe(3)
+    expect(G.hands[1].wood).toBe(0)
+    expect(G.hands[2].wood).toBe(0)
+    expect(G.hands[3].wool).toBe(5) // untouched
+    expect(G.devPlayedAtTurn).toBe(ctx0.turn)
+    expect(economy(G)).toBe(before)
+  })
+
+  it('vpCounts includes VP dev cards and both awards', () => {
+    const G = mainG(11, [0, 0, 0, 0, 0])
+    G.devHands[0] = [
+      { card: 'victoryPoint', boughtTurn: 0 },
+      { card: 'victoryPoint', boughtTurn: 1 },
+    ]
+    G.longestRoad = { player: 1, size: 7 }
+    G.largestArmy = { player: 0, size: 3 }
+    const vps = vpCounts(G)
+    expect(vps[0]).toBe(2 + 2 + 2) // settlements + army + VP cards
+    expect(vps[1]).toBe(2 + 2) // settlements + longest road
+  })
+
+  it('buying a VP card can complete the win (counts immediately)', () => {
+    const G = mainG(11, [0, 0, 1, 1, 1])
+    G.devDeck = ['victoryPoint']
+    // rig player 0 to 9 VP on a clean board: 4 cities (8) + 1 settlement (1)
+    G.buildings = { vertices: {}, edges: {} }
+    const spots = generateBoard(11).vertices.filter((vx) => vx.edgeIds.length === 3).slice(0, 5)
+    for (let i = 0; i < 4; i++) G.buildings.vertices[spots[i].id] = { player: 0, type: 'city' }
+    G.buildings.vertices[spots[4].id] = { player: 0, type: 'settlement' }
+    expect(vpCounts(G)[0]).toBe(9)
+    expect(mainMoves.buyDevCard({ G, ctx: ctx0 })).toBeUndefined()
+    expect(vpCounts(G)[0]).toBe(10)
+  })
+})
+
+describe('longest road award (integration)', () => {
+  it('placing a 5-edge chain claims Longest Road (+2 VP) via placeRoad', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const board: Board = generateBoard(11)
+    expect(G.longestRoad).toBeNull() // setup chains are only 1 edge long
+
+    // clean slate: one own settlement + road to anchor legal (paid) placements
+    G.buildings = { vertices: {}, edges: {} }
+    const anchor = board.vertices.find((vx) => vx.edgeIds.length === 3)!
+    const firstEdge = board.edgeById.get(anchor.edgeIds[0])!
+    const nextV = firstEdge.vertexIds.find((v) => v !== anchor.id)!
+    G.buildings.vertices[anchor.id] = { player: 0, type: 'settlement' }
+    G.buildings.edges[firstEdge.id] = { player: 0 }
+
+    // walk outward through the (now empty) board from the road's far end
+    const walk: string[] = [nextV]
+    const usedEdges = new Set<string>([firstEdge.id])
+    while (walk.length <= 6) {
+      const cur = board.vertexById.get(walk[walk.length - 1])!
+      const next = cur.edgeIds
+        .map((eid) => board.edgeById.get(eid)!)
+        .find((e) => !usedEdges.has(e.id) && !G.buildings.edges[e.id])
+      if (!next) break
+      usedEdges.add(next.id)
+      walk.push(next.vertexIds.find((v) => v !== cur.id)!)
+    }
+    expect(walk.length).toBeGreaterThanOrEqual(6) // board is wide open now
+
+    // pave 4 edges → chain = 1 anchor road + 4 = 5
+    const toPlace: string[] = []
+    for (let i = 0; i + 1 < walk.length && toPlace.length < 4; i++) {
+      const a = walk[i]
+      const b = walk[i + 1]
+      toPlace.push(a < b ? `${a}|${b}` : `${b}|${a}`)
+    }
+    for (const eid of toPlace.slice(0, 3)) {
+      expect(validRoadEdges(G, 0)).toContain(eid)
+      mainMoves.placeRoad({ G, ctx: ctx0 }, eid)
+    }
+    expect(G.longestRoad).toBeNull() // chain of 4 is not enough
+    expect(validRoadEdges(G, 0)).toContain(toPlace[3])
+    mainMoves.placeRoad({ G, ctx: ctx0 }, toPlace[3])
+    expect(G.longestRoad).toEqual({ player: 0, size: 5 })
+    expect(vpCounts(G)[0]).toBe(1 + 2) // settlement + award
+  })
+})
+
+describe('DEV_CARD_INFO', () => {
+  it('covers every card type', () => {
+    for (const [card] of DEV_DECK_COMPOSITION) {
+      expect(DEV_CARD_INFO[card].label).toBeTruthy()
+    }
   })
 })
 

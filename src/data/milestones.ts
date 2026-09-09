@@ -18,8 +18,8 @@ export const MILESTONES: Milestone[] = [
   { id: 'M8', title: 'Player turns', detail: 'boardgame.io engine: snake draft, turn phases, robber discard/move/steal', status: 'done' },
   { id: 'M9', title: 'Building rules', detail: 'Costs, supply limits, connectivity, distance rule, city upgrade, legal-spot ghosts', status: 'done' },
   { id: 'M10', title: 'Trading', detail: 'Bank 4:1, ports 3:1/2:1, domestic trades with accept/decline', status: 'done' },
-  { id: 'M11', title: 'Development cards', detail: 'Deck, restrictions, longest road / largest army', status: 'next' },
-  { id: 'M12', title: 'Multiplayer', detail: 'boardgame.io server, rooms, hidden hands, reconnect', status: 'todo' },
+  { id: 'M11', title: 'Development cards', detail: 'Deck, restrictions, effects, longest road / largest army', status: 'done' },
+  { id: 'M12', title: 'Multiplayer', detail: 'boardgame.io server, rooms, hidden hands, reconnect', status: 'next' },
 ]
 
 export const ART_TRACK: Milestone[] = [

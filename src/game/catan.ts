@@ -18,6 +18,13 @@
 import { generateBoard, type Board, type EdgeId, type VertexId } from './board'
 import { BANK_START, computeProduction, type Building } from './production'
 import { INVALID_MOVE } from 'boardgame.io/core'
+import { mulberry32, shuffled } from './rng'
+import {
+  claimAward,
+  LARGEST_ARMY_MIN,
+  LONGEST_ROAD_MIN,
+  longestRoadLength,
+} from './awards'
 import {
   RESOURCES,
   RESOURCE_ICONS,
@@ -39,6 +46,45 @@ export const BUILD_COSTS: Record<'road' | 'settlement' | 'city', Partial<Resourc
 
 /** Hard piece limits per player (PRD §5.1). */
 export const SUPPLY_LIMITS = { road: 15, settlement: 5, city: 4 } as const
+
+// -- development cards (M11) ----------------------------------------------------
+
+export type DevCardType = 'knight' | 'roadBuilding' | 'yearOfPlenty' | 'monopoly' | 'victoryPoint'
+
+export interface DevCardEntry {
+  card: DevCardType
+  /** ctx.turn when purchased — playing it that same turn is illegal. */
+  boughtTurn: number
+}
+
+/** Official 25-card deck: 14 knights, 2× RB/YoP/Monopoly, 5 VP (PRD §5.1). */
+export const DEV_DECK_COMPOSITION: ReadonlyArray<[DevCardType, number]> = [
+  ['knight', 14],
+  ['roadBuilding', 2],
+  ['yearOfPlenty', 2],
+  ['monopoly', 2],
+  ['victoryPoint', 5],
+]
+
+/** Deterministic deck order from the seed (xor-decorrelated from the board). */
+export function makeDevDeck(seed: number): DevCardType[] {
+  return shuffled(
+    DEV_DECK_COMPOSITION.flatMap(([card, n]) => Array<DevCardType>(n).fill(card)),
+    mulberry32(seed ^ 0x5eed),
+  )
+}
+
+/** Display metadata for the dev-card HUD (labels/icons/hints). */
+export const DEV_CARD_INFO: Record<DevCardType, { icon: string; label: string; hint: string }> = {
+  knight: { icon: '⚔', label: 'Knight', hint: 'move the robber & steal 1 card' },
+  roadBuilding: { icon: '🛣', label: 'Road Building', hint: 'place up to 2 free roads' },
+  yearOfPlenty: { icon: '💰', label: 'Year of Plenty', hint: 'take 2 resources from the bank' },
+  monopoly: { icon: '👑', label: 'Monopoly', hint: 'collect all cards of one resource' },
+  victoryPoint: { icon: '🏛', label: 'Victory Point', hint: '+1 VP — counts at the win' },
+}
+
+/** Dev card purchase price (PRD §5.7). */
+export const DEV_COST: Partial<ResourceCounts> = { wool: 1, grain: 1, ore: 1 }
 
 export interface RoadSpot {
   player: number
@@ -78,6 +124,20 @@ export interface GameState {
   stealTargets: number[] | null
   /** A domestic trade awaiting the partner's response (null = none). */
   pendingTrade: PendingTrade | null
+  /** Remaining development deck (top = index 0). */
+  devDeck: DevCardType[]
+  /** Per-player dev cards in hand (VP cards stay hidden until the win). */
+  devHands: DevCardEntry[][]
+  /** ctx.turn of the last dev card played — one per turn. */
+  devPlayedAtTurn: number
+  /** Revealed knights per player (Largest Army metric). */
+  playedKnights: number[]
+  /** Pending dev-card effect within the current turn (mirrors robberStep). */
+  devStep: 'roadBuilding' | 'yearOfPlenty' | null
+  /** Free roads still to place while devStep === 'roadBuilding'. */
+  roadBuildingLeft: number
+  longestRoad: { player: number; size: number } | null
+  largestArmy: { player: number; size: number } | null
   log: string[]
 }
 
@@ -145,6 +205,12 @@ const PLAYER_NAMES = ['Red', 'Blue', 'Orange', 'White']
 export function vpCounts(G: GameState): number[] {
   const vps = Array.from({ length: G.hands.length }, () => 0)
   for (const b of Object.values(G.buildings.vertices)) vps[b.player] += b.type === 'city' ? 2 : 1
+  for (let p = 0; p < G.hands.length; p++) {
+    // VP dev cards count toward the win (revealed on the spot) — PRD §5.6
+    vps[p] += G.devHands[p].filter((c) => c.card === 'victoryPoint').length
+  }
+  if (G.longestRoad) vps[G.longestRoad.player] += 2
+  if (G.largestArmy) vps[G.largestArmy.player] += 2
   return vps
 }
 
@@ -251,17 +317,23 @@ function connectsThrough(G: GameState, board: Board, vertexId: VertexId, player:
   return v.edgeIds.some((eid) => G.buildings.edges[eid]?.player === player)
 }
 
-/** Fully legal road spots: empty, connected, affordable, supply remaining. */
-export function validRoadEdges(G: GameState, player: number): EdgeId[] {
+/** Fully legal road spots: empty, connected, supply remaining (no cost —
+ *  also the Road Building effect's placement rule). */
+export function connectedRoadEdges(G: GameState, player: number): EdgeId[] {
   const board = boardFor(G.seed)
   if (pieceCounts(G, player).road >= SUPPLY_LIMITS.road) return []
-  if (!canAfford(G.hands[player], BUILD_COSTS.road)) return []
   const out: EdgeId[] = []
   for (const e of board.edges) {
     if (G.buildings.edges[e.id]) continue
     if (e.vertexIds.some((vid) => connectsThrough(G, board, vid, player))) out.push(e.id)
   }
   return out
+}
+
+/** Fully legal *paid* road spots: connected + affordable. */
+export function validRoadEdges(G: GameState, player: number): EdgeId[] {
+  if (!canAfford(G.hands[player], BUILD_COSTS.road)) return []
+  return connectedRoadEdges(G, player)
 }
 
 /** Fully legal settlement spots: empty, distance rule, own road, affordable, supply. */
@@ -357,6 +429,14 @@ function doSteal(G: GameState, victim: number, thief: number, die: (n: number) =
   return card
 }
 
+/** Recompute Longest Road / Largest Army after board- or knight-changing moves. */
+function updateAwards(G: GameState) {
+  const board = boardFor(G.seed)
+  const lengths = G.hands.map((_, p) => longestRoadLength(G.buildings, board, p))
+  G.longestRoad = claimAward(G.longestRoad, lengths, LONGEST_ROAD_MIN)
+  G.largestArmy = claimAward(G.largestArmy, G.playedKnights, LARGEST_ARMY_MIN)
+}
+
 /** Second-round setup settlements collect 1 card per adjacent producing hex. */
 function grantSetupResources(G: GameState, player: number, vertexId: VertexId) {
   const board = boardFor(G.seed)
@@ -391,6 +471,7 @@ function placeSetup({ G, ctx, events }: MoveArgs, vertexId: VertexId, edgeId: Ed
   G.setupPlacements++
   pushLog(G, `${PLAYER_NAMES[player]} placed a settlement${secondRound ? ' (2nd)' : ''} + road`)
   if (secondRound) grantSetupResources(G, player, vertexId)
+  updateAwards(G)
 
   // endIf on the setup phase is evaluated at turn end — always end the turn
   events?.endTurn()
@@ -473,38 +554,161 @@ function steal({ G, ctx, random }: MoveArgs, victimId: number) {
 
 function placeSettlement({ G, ctx }: MoveArgs, vertexId: VertexId) {
   if (!G) return INVALID
-  if (!G.rolled || G.robberStep) return INVALID
+  if (!G.rolled || G.robberStep || G.devStep) return INVALID
   const player = Number(ctx.currentPlayer)
   if (!validSettlementVertices(G, player).includes(vertexId)) return INVALID
   payCost(G, player, BUILD_COSTS.settlement)
   G.buildings.vertices[vertexId] = { player, type: 'settlement' }
   pushLog(G, `${PLAYER_NAMES[player]} built a settlement (${costLabel(BUILD_COSTS.settlement)})`)
+  updateAwards(G) // a new settlement can cut an opponent's road
 }
 
 function placeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
   if (!G) return INVALID
-  if (!G.rolled || G.robberStep) return INVALID
+  if (!G.rolled || G.robberStep || G.devStep) return INVALID
   const player = Number(ctx.currentPlayer)
   if (!validRoadEdges(G, player).includes(edgeId)) return INVALID
   payCost(G, player, BUILD_COSTS.road)
   G.buildings.edges[edgeId] = { player }
   pushLog(G, `${PLAYER_NAMES[player]} built a road (${costLabel(BUILD_COSTS.road)})`)
+  updateAwards(G)
 }
 
 function upgradeCity({ G, ctx }: MoveArgs, vertexId: VertexId) {
   if (!G) return INVALID
-  if (!G.rolled || G.robberStep) return INVALID
+  if (!G.rolled || G.robberStep || G.devStep) return INVALID
   const player = Number(ctx.currentPlayer)
   if (!validCityVertices(G, player).includes(vertexId)) return INVALID
   payCost(G, player, BUILD_COSTS.city)
   G.buildings.vertices[vertexId] = { player, type: 'city' }
   pushLog(G, `${PLAYER_NAMES[player]} upgraded a city (${costLabel(BUILD_COSTS.city)})`)
+  updateAwards(G)
+}
+
+// -- development cards (M11) -------------------------------------------------------
+
+function buyDevCard({ G, ctx }: MoveArgs) {
+  if (!G) return INVALID
+  if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return INVALID
+  if (G.devDeck.length === 0) return INVALID
+  const player = Number(ctx.currentPlayer)
+  if (!canAfford(G.hands[player], DEV_COST)) return INVALID
+
+  payCost(G, player, DEV_COST)
+  const card = G.devDeck[0]
+  G.devDeck = G.devDeck.slice(1)
+  G.devHands[player] = [...G.devHands[player], { card, boughtTurn: ctx.turn }]
+  pushLog(G, `${PLAYER_NAMES[player]} bought a development card (${G.devDeck.length} left)`) // draw stays secret
+  // a VP card may complete 10 VP — endIf checks vpCounts right after this move
+}
+
+/** Shared playability gate; returns the entry if playable. */
+function devCardPlayable(G: GameState, player: number, ctxTurn: number, index: number): DevCardEntry | null {
+  const entry = G.devHands[player]?.[index]
+  if (!entry) return null
+  if (entry.card === 'victoryPoint') return null // VP cards count automatically, never "played"
+  if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return null
+  if (G.devPlayedAtTurn === ctxTurn) return null // at most one dev card per turn
+  if (entry.boughtTurn === ctxTurn) return null // never the card bought this turn
+  return entry
+}
+
+function playDevCard({ G, ctx }: MoveArgs, index: number, monopolyResource?: Resource) {
+  if (!G) return INVALID
+  const player = Number(ctx.currentPlayer)
+  const entry = devCardPlayable(G, player, ctx.turn, index)
+  if (!entry) return INVALID
+  if (entry.card === 'monopoly' && !monopolyResource) return INVALID
+
+  G.devHands[player] = G.devHands[player].filter((_, i) => i !== index)
+  G.devPlayedAtTurn = ctx.turn
+
+  switch (entry.card) {
+    case 'knight': {
+      G.playedKnights[player]++
+      pushLog(G, `${PLAYER_NAMES[player]} played a Knight (${G.playedKnights[player]} total)`)
+      updateAwards(G)
+      G.robberStep = 'move' // reuse the standard robber flow (no discard step)
+      break
+    }
+    case 'roadBuilding': {
+      pushLog(G, `${PLAYER_NAMES[player]} played Road Building — place up to 2 free roads`)
+      G.devStep = 'roadBuilding'
+      G.roadBuildingLeft = 2
+      if (connectedRoadEdges(G, player).length === 0) {
+        G.devStep = null // nowhere to build — effect fizzles
+        G.roadBuildingLeft = 0
+      }
+      break
+    }
+    case 'yearOfPlenty': {
+      pushLog(G, `${PLAYER_NAMES[player]} played Year of Plenty`)
+      G.devStep = 'yearOfPlenty'
+      break
+    }
+    case 'monopoly': {
+      const r = monopolyResource!
+      let collected = 0
+      for (let p = 0; p < G.hands.length; p++) {
+        if (p === player) continue
+        collected += G.hands[p][r]
+        const hand = { ...G.hands[p] }
+        hand[r] = 0
+        G.hands[p] = hand
+      }
+      const hand = { ...G.hands[player] }
+      hand[r] += collected
+      G.hands[player] = hand
+      pushLog(G, `${PLAYER_NAMES[player]} monopolized ${RESOURCE_ICONS[r]} — collected ${collected}`)
+      break
+    }
+  }
+}
+
+/** Place one of Road Building's free roads (normal placement rules, no cost). */
+function placeFreeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
+  if (!G) return INVALID
+  if (G.devStep !== 'roadBuilding' || G.roadBuildingLeft <= 0) return INVALID
+  const player = Number(ctx.currentPlayer)
+  if (!connectedRoadEdges(G, player).includes(edgeId)) return INVALID
+
+  G.buildings.edges[edgeId] = { player }
+  G.roadBuildingLeft--
+  pushLog(G, `${PLAYER_NAMES[player]} placed a free road (${G.roadBuildingLeft} left)`)
+  updateAwards(G)
+  if (G.roadBuildingLeft === 0 || connectedRoadEdges(G, player).length === 0) {
+    G.devStep = null
+    G.roadBuildingLeft = 0
+  }
+}
+
+/** Take Year of Plenty's 2 resources from the bank (may be the same). */
+function takeYearOfPlenty({ G, ctx }: MoveArgs, r1: Resource, r2: Resource) {
+  if (!G) return INVALID
+  if (G.devStep !== 'yearOfPlenty') return INVALID
+  const need = emptyResourceCounts()
+  need[r1] += 1
+  need[r2] += 1
+  for (const r of RESOURCES) {
+    if (need[r] > G.bank[r]) return INVALID // empty-stack rule
+  }
+  const player = Number(ctx.currentPlayer)
+  const hand = { ...G.hands[player] }
+  const bank = { ...G.bank }
+  for (const r of RESOURCES) {
+    hand[r] += need[r]
+    bank[r] -= need[r]
+  }
+  G.hands[player] = hand
+  G.bank = bank
+  G.devStep = null
+  pushLog(G, `${PLAYER_NAMES[player]} took ${countsLabel(need)} from the bank (Year of Plenty)`)
 }
 
 /** Maritime trade: give `rate` of one resource for 1 of another (PRD §5.3.2). */
 function tradeBank({ G, ctx }: MoveArgs, give: Resource, take: Resource) {
   if (!G) return INVALID
-  if (!G.rolled || G.robberStep || G.pendingTrade) return INVALID
+  if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return INVALID
   if (give === take) return INVALID
   const player = Number(ctx.currentPlayer)
   const rate = bankTradeRate(G, player, give)
@@ -530,7 +734,7 @@ function proposeTrade(
   take: Partial<ResourceCounts>,
 ) {
   if (!G) return INVALID
-  if (!G.rolled || G.robberStep || G.pendingTrade) return INVALID
+  if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return INVALID
   const proposer = Number(ctx.currentPlayer)
   if (partnerId === proposer || partnerId < 0 || partnerId >= G.hands.length) return INVALID
 
@@ -597,6 +801,11 @@ function declineTrade({ G, ctx, playerID, events }: MoveArgs) {
 function endTurn({ G, events }: MoveArgs) {
   if (!G) return INVALID
   if (!G.rolled || G.robberStep) return INVALID
+  if (G.devStep) {
+    // "up to 2" free roads — unplaced ones are forfeited
+    G.devStep = null
+    G.roadBuildingLeft = 0
+  }
   events?.endTurn()
 }
 
@@ -639,6 +848,14 @@ export const CatanGame = {
       pendingDiscards: {},
       stealTargets: null,
       pendingTrade: null,
+      devDeck: makeDevDeck(seed),
+      devHands: [0, 1, 2, 3].map(() => []),
+      devPlayedAtTurn: -1,
+      playedKnights: [0, 0, 0, 0],
+      devStep: null,
+      roadBuildingLeft: 0,
+      longestRoad: null,
+      largestArmy: null,
       log: [],
     }
   },
@@ -661,6 +878,9 @@ export const CatanGame = {
           G.stealTargets = null
           G.pendingDiscards = {}
           G.pendingTrade = null
+          G.devStep = null
+          G.roadBuildingLeft = 0
+          G.devPlayedAtTurn = -1
           return G
         },
         stages: {
@@ -668,7 +888,21 @@ export const CatanGame = {
           respond: { moves: { acceptTrade, declineTrade } },
         },
       },
-      moves: { roll, moveRobber, steal, placeSettlement, placeRoad, upgradeCity, tradeBank, proposeTrade, endTurn },
+      moves: {
+        roll,
+        moveRobber,
+        steal,
+        placeSettlement,
+        placeRoad,
+        upgradeCity,
+        tradeBank,
+        proposeTrade,
+        buyDevCard,
+        playDevCard,
+        placeFreeRoad,
+        takeYearOfPlenty,
+        endTurn,
+      },
     },
   },
 

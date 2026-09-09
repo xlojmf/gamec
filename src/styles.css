@@ -477,6 +477,29 @@ code {
   margin: 0.4rem 0 0;
 }
 
+/* --- development cards ---------------------------------------------------------- */
+
+.dev-hand {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.dev-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25em 0.45em;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.dev-card-name {
+  font-size: 0.82rem;
+}
+.dev-knights {
+  margin: 0.4rem 0 0;
+}
+
 /* --- dice ----------------------------------------------------------------- */
 
 .dice-roll-btn {
