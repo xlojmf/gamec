@@ -122,12 +122,20 @@ function useCatanClient(config: ClientConfig | null) {
     }
   }, [config])
 
-  /** Dispatch a move as the given player (hotseat acts for everyone; mp is fixed). */
+  /**
+   * Dispatch a move as the given player (hotseat acts for everyone; mp is fixed).
+   * Only switch playerID when it actually changes: in multiplayer the seat is
+   * fixed for the client's lifetime, and boardgame.io's updatePlayerID emits a
+   * full-state `sync` request. Calling it on every move made the stale sync
+   * response race the move's broadcast — the local client could be rolled back
+   * to the pre-move state for seconds while every other player updated instantly.
+   */
   const move = useCallback(
     (pid: number, fn: (moves: Record<string, (...args: unknown[]) => unknown>) => void) => {
       const client = clientRef.current
       if (!client) return
-      client.updatePlayerID(String(fixedSeat ?? pid))
+      const target = String(fixedSeat ?? pid)
+      if (client.playerID !== target) client.updatePlayerID(target)
       fn(client.moves as Record<string, (...args: unknown[]) => unknown>)
     },
     [fixedSeat],
