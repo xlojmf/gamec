@@ -32,6 +32,9 @@ const MIME = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.map': 'application/json',
@@ -52,7 +55,7 @@ const server = http.createServer(async (req, res) => {
     const filePath = tryStaticFile(req.url ?? '/')
     if (filePath) {
       res.setHeader('Content-Type', MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream')
-      res.setHeader('Cache-Control', path.basename(filePath).includes('.') && filePath.includes(path.join('assets', '')) ? 'public, max-age=31536000, immutable' : 'no-cache')
+      res.setHeader('Cache-Control', /-[A-Za-z0-9_-]{8,}\.(?:js|css)$/.test(path.basename(filePath)) ? 'public, max-age=31536000, immutable' : 'no-cache')
       createReadStream(filePath).pipe(res)
       return
     }

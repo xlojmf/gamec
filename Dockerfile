@@ -10,7 +10,11 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+ARG VITE_GAME_SERVER_URL=""
+ARG VITE_GAME_SERVER_PORT=8000
+ENV VITE_GAME_SERVER_URL=$VITE_GAME_SERVER_URL
+ENV VITE_GAME_SERVER_PORT=$VITE_GAME_SERVER_PORT
+RUN npm run build && npm run build:game
 
 # ---- runtime stage ----------------------------------------------------------
 FROM node:22-alpine AS runtime

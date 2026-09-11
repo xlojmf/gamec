@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| **Status** | In active development (M0–M5 complete) |
-| **Version** | 0.1.0 |
+| **Status** | v1 implemented — M0–M13 and A1–A6 complete |
+| **Version** | 1.0.0 |
 | **Owner** | you 🙂 |
 | **Repo** | `catan/` |
 
@@ -49,7 +49,7 @@ Open a link → see a warm, hand-crafted-feeling island floating in the sea → 
 
 | Layer | Choice | Why | Main risk & mitigation |
 |---|---|---|---|
-| Rendering | **Three.js** (vanilla, no R3F) | Full control of scene, render loop and picking for a board game; no React-reconciler overhead; `OrbitControls` from `three/addons`. | More manual sync code → mitigated by a thin `GameView` facade class that is the *only* place touching Three.js. |
+| Rendering | **Three.js** (vanilla, no R3F) | Full control of scene, render loop and picking for a board game; no React-reconciler overhead; `OrbitControls` from `three/addons`. | More manual sync code → mitigated by a thin `GameView` facade; Three.js and reusable scenery/building factories stay isolated in `src/three/*`. |
 | App framework | **TanStack Start** (React 19 + Vite, SSR) | Modern full-stack TypeScript; file-based routes for `/`, `/game`, `/rules`; same repo can later host the boardgame.io server. | Young framework, API churn → pin versions, keep framework usage shallow (routes + components only). |
 | Game engine | **boardgame.io** | Rules as pure `moves` + `phases` + turn order; built-in random (seeded), viewable/secret state, transport, lobby, persistence. Local mode now → multiplayer later with near-zero logic rewrite. | Framework opinions differ from ours → the pure logic lives in `src/game/*` with plain data in/out, boardgame.io is a thin adapter. |
 | Multiplayer transport | boardgame.io socket.io server | Reconnect support, lobby API, rooms. | — |
@@ -211,14 +211,19 @@ Mapped 1:1 to the incremental build plan. Each milestone ships green (typecheck 
 | M9 | Building rules | Costs, supply limits, connectivity, distance rule, road-cutting | Illegal builds impossible; costs exact per §5.7 | ✅ |
 | M10 | Trading | Bank 4:1, ports 3:1 & 2:1, player-to-player trade offers | Trades validated per §5.3.2 | ✅ |
 | M11 | Development cards | Deck, play restrictions, Largest Army / Longest Road, VP win check | Dev cards fully functional; awards transfer correctly | ✅ |
-| M12 | Multiplayer | boardgame.io server in compose, lobby/join codes, hidden hands, reconnect | 2+ browsers play one authoritative game; refresh reconnects | ⏳ next |
+| M12 | Multiplayer | boardgame.io server in compose, lobby/join codes, hidden hands, reconnect | 2+ browsers play one authoritative game; refresh reconnects | ✅ |
 
-### Art track (parallel, GPT Astra)
+| M13 | Rules refinements & resilience | Pre-roll development cards, 3–4 players, persistence, watchdog, rematch | Existing rules/server tests | ✅ |
+
+### Art track (complete)
 | # | Pass | Output |
 |---|---|---|
 | A1 | Concept & mood boards | `docs/art/concept/` — island mood, palette, lighting refs → lock design tokens |
 | A2 | World textures | tile top/side textures ×6 terrains, water, number token plate, frame |
 | A3 | UI kit | HUD panels, buttons, icons, dice faces, logo, font pairing |
+| A4 | Sound | Supplied MP3 soundboard with default Imperial march, event cues, and mute control |
+| A5 | Feel & feedback | Placement animation, safe paid-build undo, full journal, responsive HUD |
+| A6 | Trade negotiation | Multi-recipient offers, independent declines, first acceptance, counter-offers |
 
 Each pass writes its prompts to `docs/art/prompts.md` and files into `public/assets/astra/<slot>` registered by `manifest.json`; the renderer falls back to procedural art for any missing slot.
 
@@ -226,12 +231,12 @@ Each pass writes its prompts to `docs/art/prompts.md` and files into `public/ass
 
 ## 7. Multiplayer Design (M12)
 
-- **Server**: boardgame.io node server as a `game` compose service on `:8000`; the web client connects with `multiplayer: { server: '<host>:8000', roomID }`.
+- **Server**: boardgame.io node server as a `game` compose service on `:8000`; the web client connects with `multiplayer: SocketIO({ server: '<host>:8000' }), matchID, playerID, credentials`.
 - **Rooms**: boardgame.io lobby API — create room → 4-char join code → seat selection. No accounts.
 - **Secret state**: resource hands & dev cards per-player via boardgame.io secret/`playerID`-scoped state; clients only ever receive their own hand.
 - **Determinism**: server owns the board seed + dice (boardgame.io random), clients render from state.
 - **Reconnect**: boardgame.io credentials stored in `sessionStorage`; refresh → rejoin same seat.
-- **Later (stretch)**: persistence adapter (SQLite/Postgres) so rooms survive server restarts.
+- **Persistence**: FlatFile matches and rooms.json in the catan-data volume survive server restarts.
 
 ---
 
@@ -265,7 +270,11 @@ Each pass writes its prompts to `docs/art/prompts.md` and files into `public/ass
 
 ## 11. Open Questions
 
-1. Hotseat + online in one code path (boardgame.io local from M8) — confirmed approach?
-2. Art style target for A1: *cozy hand-painted tabletop* vs *low-poly stylized*? (Recommend: cozy hand-painted.)
-3. Room codes 4-char vs 6-char for M12?
-4. Do we want a spectator mode for streamers? (post-v1)
+1. Hotseat and online share the rules engine.
+2. Art direction: cozy hand-painted tabletop, generated maps plus procedural 3D props.
+3. Four-character room codes.
+4. Spectator mode remains a post-v1 option.
+
+## 12. Shipped art and interaction details
+
+The visual catalog is `public/assets/astra/kit.html`; prompts and integration rules are in `docs/art/`. Safe undo applies to the most recent paid build on the same turn and expires with the next logged action. It cannot undo a development draw, roll or accepted trade. Multi-recipient offers go to players able to fulfill the terms; first acceptance completes one exchange. A counter replaces the offer with a one-to-one proposal requiring fresh consent.

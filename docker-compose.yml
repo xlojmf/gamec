@@ -1,11 +1,50 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_GAME_SERVER_URL: ${VITE_GAME_SERVER_URL:-}
+        VITE_GAME_SERVER_PORT: ${VITE_GAME_SERVER_PORT:-8000}
     image: catan-3d
     ports:
-      - '3000:3000'
+      - '${CATAN_WEB_PORT:-3000}:3000'
     restart: unless-stopped
-    # M12 adds the boardgame.io multiplayer server as a `game` service here.
+    depends_on:
+      game:
+        condition: service_healthy
+
+  # boardgame.io multiplayer server (M12): ws transport + lobby API + rooms
+  # codes on :8000. Matches + rooms persist in the catan-data volume, so a
+  # container restart keeps games in progress alive. The watchdog auto-plays
+  # for seats idle past TURN_TIMEOUT_SECONDS so abandoned browsers can't
+  # freeze a match.
+  game:
+    image: catan-3d
+    command: ['node', 'dist/game/gameServer.js']
+    environment:
+      PORT: '8000'
+      FLATFILE_DIR: /data
+      TURN_TIMEOUT_SECONDS: '180'
+    volumes:
+      - catan-data:/data
+    ports:
+      - '${CATAN_GAME_PORT:-8000}:8000'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  catan-data:
 
 # Usage:
-#   docker compose up --build      → http://localhost:3000
+#   docker compose up --build      → http://localhost:3000 (web) + :8000 (game)

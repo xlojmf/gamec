@@ -1,0 +1,221 @@
+/* The tabletop uses one grid so controls never cover the hand or each other. */
+.game-shell {
+  --text:#f0e8d4; --muted:#a4b9ae; --line:#bda57438; --accent:#dec087;
+  --accent-2:#b2cab2; --bg-2:#153c40;
+  display:grid; grid-template-columns:210px minmax(0,1fr) 300px;
+  grid-template-rows:64px minmax(0,1fr) auto; gap:0 10px;
+  background:radial-gradient(ellipse at 48% 38%,#2b5657 0,#173f43 42%,#0b2b33 100%);
+  font-family:'Trebuchet MS','Segoe UI',sans-serif;
+}
+.game-shell::before { content:''; position:absolute; inset:64px 0 0; pointer-events:none; background:url('/assets/astra/ui/sea-chart.svg') center/1000px; opacity:.32; }
+.game-shell .hud { position:relative; inset:auto; min-width:0; }
+.game-shell .hud-top { grid-column:1/-1; grid-row:1; padding:10px 22px; gap:10px; height:64px; background:#102e34dc; border-bottom:1px solid #bda57440; }
+.game-shell .hud-brand { font:18px Georgia,serif; letter-spacing:2.5px; }
+.game-shell .hud-brand img { width:30px; height:30px; }
+.game-shell .hud-seed { margin:0 0 0 12px; font-size:10px; color:#a4b5a8; }
+.game-shell .hud-seat { font-size:11px; margin-right:auto; }
+.game-shell .hud-top .btn { min-height:36px; font-size:11px; border-radius:6px; color:#e3dac3; background:#ffffff05; border-color:#c3ad7838; }
+.game-shell .table-hands-toggle { margin-left:auto; }
+.game-shell .hud-top>.btn:first-of-type { margin-left:auto; }
+.game-shell .game-canvas { position:relative; inset:auto; grid-column:2; grid-row:2; min-width:0; min-height:0; width:100%; height:100%; background:none; }
+.game-shell .game-canvas canvas { position:absolute; inset:0; width:100%; height:100%; }
+.game-shell .turn-banner { position:relative; inset:auto; transform:none; grid-column:2; grid-row:2; justify-self:center; align-self:start; margin-top:16px; max-width:95%; width:max-content; font-size:11px; padding:9px 16px; color:#f0e6ce; background:#102f35e8; border:1px solid #d1b37360; border-radius:24px; box-shadow:0 4px 18px #001d2633; text-align:center; white-space:normal; pointer-events:none; }
+.game-shell .hud-bottom { grid-column:2; grid-row:2; align-self:end; justify-self:center; width:auto; margin:0 0 7px; padding:4px; background:none; color:#b4c2b6; font-size:9px; pointer-events:none; }
+.canvas-controls { position:absolute; right:12px; bottom:15px; z-index:3; display:flex; gap:1px; padding:3px; border:1px solid #bda5744d; border-radius:7px; background:#102f35ed; }
+.canvas-controls button { border:0; background:transparent; color:#e7d1a1; width:33px; height:33px; display:grid; place-items:center; font-size:21px; cursor:pointer; border-radius:4px; }
+.canvas-controls button:hover { background:#d8bd7a25; }
+.board-inspect { position:relative; z-index:4; grid-column:2; grid-row:2; align-self:end; justify-self:center; margin-bottom:50px; display:flex; gap:9px; align-items:center; max-width:90%; padding:9px 13px; background:#0d2d34ee; border:1px solid #bda57466; border-radius:7px; pointer-events:none; }
+.board-inspect strong { display:block; color:#e7cf9a; font-size:12px; }
+.board-inspect small { display:block; color:#b0c2b2; font-size:10px; }
+.game-icon { width:21px; height:21px; flex-shrink:0; vertical-align:middle; }
+.game-shell button:focus-visible,.game-shell a:focus-visible,.game-shell select:focus-visible,.game-shell summary:focus-visible { outline:2px solid #f2d295; outline-offset:3px; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
+/* All four seats fit, with the sound transport directly below them. */
+.game-shell .player-rail { grid-column:1; grid-row:2/4; width:auto; margin:23px 0 18px 18px; display:flex; flex-direction:column; gap:14px; overflow:auto; scrollbar-width:thin; scrollbar-color:#7f825e transparent; }
+.rail-title { display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px; }
+.rail-title .eyebrow { font-size:9px; letter-spacing:1.5px; }
+.rail-title small { color:#9db4a7; font-size:10px; }
+.game-shell .player-rail .hands { display:flex; flex-direction:column; gap:8px; }
+.game-shell .player-rail .hand-row { display:grid; grid-template-columns:9px minmax(0,1fr) auto; gap:6px; padding:11px; border:1px solid #bda57430; border-radius:7px; background:linear-gradient(120deg,#294b4d9c,#112f3699); }
+.game-shell .player-rail .hand-row-active { border-color:#d5b777; background:linear-gradient(120deg,#46615872,#173c3f); box-shadow:inset 3px 0 #d5b777,0 5px 18px #001a2520; }
+.game-shell .player-rail .chip-dot { width:8px; height:8px; align-self:center; }
+.game-shell .hand-name { min-width:0; font-size:12px; display:flex; align-items:center; gap:6px; }
+.player-turn-label { color:#d8be86; font-size:8px; font-weight:400; }
+.game-shell .hand-vp { grid-column:3; grid-row:1; font:16px Georgia,serif; color:#e0c48b; white-space:nowrap; }
+.game-shell .player-rail .hand-res { grid-column:1/-1; display:flex; justify-content:space-between; margin:3px 0 0; gap:4px; font-size:11px; }
+.game-shell .player-rail .hand-res>span { display:flex; gap:3px; align-items:center; }
+.game-shell .player-rail .hand-res .resource-icon { width:17px; height:17px; }
+.player-card-count { grid-column:1/-1; grid-row:3; font-size:9px; color:#afc0b1; }
+.last-card-note { width:100%; border:1px solid #bda57438; background:#d5c28b0b; color:#dcca9e; border-radius:6px; text-align:left; padding:10px 12px; cursor:pointer; }
+.last-card-note span { display:block; font-size:8px; letter-spacing:1px; margin-bottom:4px; }
+.last-card-note strong { font:15px Georgia,serif; }
+.last-card-note small { float:right; font-size:10px; color:#aabdad; }
+.soundboard { margin-top:8px; padding:12px; border:1px solid #baa27040; border-radius:8px; background:#0f3035b8; }
+.soundboard-heading { display:flex; align-items:center; justify-content:space-between; gap:4px; margin-bottom:12px; }
+.soundboard-heading .eyebrow { color:#d7bf89; font-size:8px; letter-spacing:1px; }
+.soundboard-heading small { color:#a4b9aa; font-size:8px; }
+.soundboard-transport { display:flex; align-items:center; gap:8px; }
+.sound-play { flex:0 0 34px; height:34px; border:1px solid #d8b779; border-radius:50%; background:#e0c18a; color:#173b3b; cursor:pointer; font-size:12px; }
+.soundboard-transport label { flex:1; min-width:0; }
+.soundboard select { width:100%; min-height:34px; padding:4px 0; background:#12363b; color:#e0dac6; border:0; border-bottom:1px solid #ac98683b; font-size:11px; }
+.soundboard-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; margin-top:11px; }
+.soundboard-button { display:flex; align-items:center; justify-content:center; gap:4px; min-height:30px; padding:3px; border:1px solid #ac986832; border-radius:4px; background:#ffffff04; color:#d6c79f; font-size:9px; cursor:pointer; }
+.soundboard-button .game-icon { width:14px; height:14px; }
+.soundboard-button:hover { background:#d7bd7830; border-color:#ddc184; }
+.sound-volume { display:flex; gap:10px; align-items:center; font-size:9px; color:#9db4a7; margin-top:9px; }
+.sound-volume input { width:100%; min-width:0; height:16px; accent-color:#cdb17a; }
+
+/* Ivory resource plates and green development cards remain visible together. */
+.game-shell .resource-tray { grid-column:2; grid-row:3; width:100%; max-width:1060px; height:auto; margin:0 auto 20px; padding:12px 12px 14px; border:1px solid #baa27035; border-radius:10px; background:linear-gradient(#153b3f9c,#0c2b32cc); box-shadow:0 12px 28px #001a2526; }
+.tray-label { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
+.tray-label .eyebrow { font-size:9px; letter-spacing:1.4px; }
+.tray-label>span:last-child { font-size:9px; color:#a4baac; }
+.hand-card-row { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(0,1fr); align-items:stretch; gap:12px; }
+.resource-cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:6px; align-self:stretch; }
+.resource-card { position:relative; display:grid; grid-template-columns:1fr 1fr; align-items:center; align-content:center; gap:8px 3px; padding:10px 8px; min-height:88px; color:#294334; background:linear-gradient(140deg,#f4ebd2,#d7c8a6); border:1px solid #ecd9ac; border-radius:6px; box-shadow:0 3px 0 #7e6b4e; }
+.resource-card .resource-icon { width:32px; height:32px; max-width:100%; }
+.resource-card strong { font:28px Georgia,serif; text-align:right; }
+.resource-card>span { grid-column:1/-1; font-size:8px; text-transform:uppercase; letter-spacing:.8px; }
+.resource-empty { background:linear-gradient(140deg,#e4dfc9,#b9b9a2); border-color:#c4c5a8; }
+.resource-empty .resource-icon { opacity:.72; }
+.development-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr)); gap:6px; padding-left:12px; border-left:1px solid #bda57440; }
+.development-card { position:relative; display:grid; grid-template-columns:26px 1fr; align-content:center; align-items:center; gap:6px; text-align:left; padding:10px; border:1px solid #b8a06b88; border-radius:6px; background:linear-gradient(135deg,#375d50,#193f40); color:#e9ddbd; cursor:pointer; min-height:88px; box-shadow:0 3px 0 #08272c; }
+.development-card .game-icon { width:24px; height:24px; color:#ddbc77; }
+.development-card strong { font:13px/1.15 Georgia,serif; padding-right:10px; }
+.development-card .dev-count { position:absolute; top:5px; right:6px; font-size:9px; color:#e5c78e; }
+.development-card small { grid-column:1/-1; color:#b4c8b5; font-size:9px; }
+.development-card:hover { background:linear-gradient(135deg,#4c715b,#214d45); border-color:#e5c689; }
+.development-empty { display:flex; gap:10px; align-items:center; justify-content:center; min-height:88px; color:#a9b9a8; border:1px dashed #bda57445; border-radius:6px; }
+.development-empty .game-icon { width:29px; height:29px; color:#bba572; }
+.development-empty strong { display:block; font:14px Georgia,serif; color:#d0ceb6; }
+.development-empty span { display:block; font-size:9px; margin-top:5px; }
+
+/* Actions scroll within the panel; End turn has its own footer. */
+.game-shell .hud-panel { grid-column:3; grid-row:2/4; display:flex; flex-direction:column; width:auto; min-height:0; max-height:none; margin:18px 18px 20px 0; padding:0; overflow:hidden; color:var(--text); background:linear-gradient(150deg,#1b4245ee,#0e2d33f2); border:1px solid #c4aa705e; border-radius:10px; box-shadow:0 15px 45px #001a2533,inset 0 0 0 4px #b69b6108; --muted:#a7bbae; --text:#eee4cb; --line:#bda57430; --bg-2:#21464a; --accent:#dec087; --accent-2:#b1c9ae; }
+.action-panel-body { padding:18px; overflow-y:auto; min-height:0; scrollbar-width:thin; scrollbar-color:#8b865e transparent; flex:1; }
+.game-shell .table-heading { display:none; }
+.captain-card { padding:0 0 14px; }
+.captain-card>div { display:flex; align-items:center; gap:8px; }
+.captain-card h2 { font:25px Georgia,serif; margin:0; letter-spacing:-.6px; }
+.captain-score { margin-left:auto; color:#e4c58a; font:25px Georgia,serif; }
+.captain-score small { font:11px 'Trebuchet MS',sans-serif; color:#9db4a7; }
+.captain-card p { font-size:11px; line-height:1.6; margin:9px 0 0; color:#b5c6b7; }
+.game-shell .hud-panel h3 { font:10px 'Trebuchet MS',sans-serif; letter-spacing:1.3px; color:#c9ba91; margin:17px 0 10px; border:0; padding:0; }
+.action-panel-body>h3:not(#development-actions) { display:none; }
+.game-shell .hud-panel .btn { border-radius:6px; background:#ffffff04; color:#e8ddc1; border-color:#bba5704a; min-height:38px; box-shadow:none; font-size:12px; }
+.game-shell .hud-panel .btn-primary,.game-shell .hud-panel .btn-active { background:linear-gradient(#efd4a0,#d4b074); border-color:#ebcd91; color:#243d32; box-shadow:0 3px 0 #80663e; font-weight:bold; }
+.game-shell .hud-panel .btn:hover:not(:disabled) { background:#ffffff12; border-color:#dbc18a; }
+.game-shell .hud-panel .btn-primary:hover:not(:disabled),.game-shell .hud-panel .btn-active:hover:not(:disabled) { background:#edcf96; }
+.game-shell .btn:disabled { opacity:.6; cursor:not-allowed; }
+.setup-guide { padding:15px; border:1px solid var(--line); border-radius:6px; background:#c6b37908; }
+.setup-guide .eyebrow { font-size:8px; letter-spacing:1.3px; color:#cbb785; margin:0; }
+.setup-steps { display:flex; align-items:center; gap:8px; margin:18px 0; }
+.setup-steps>span { display:flex; align-items:center; gap:6px; color:#91a499; font-size:11px; }
+.setup-steps b { display:grid; place-items:center; width:24px; height:24px; border:1px solid #8d956f66; border-radius:50%; font-weight:normal; }
+.setup-steps i { height:1px; background:#bba57445; flex:1; }
+.setup-steps .current-step { color:#ebd3a0; }
+.setup-steps .current-step b { background:#dec187; color:#1b3d37; border-color:#dec187; }
+.setup-steps .complete-step { color:#a6c4a1; }
+.setup-guide>p:not(.eyebrow) { color:#c0cbbb; font-size:11px; line-height:1.6; margin:12px 0; }
+.setup-guide>small { display:block; font-size:10px; line-height:1.6; color:#90aa9c; border-top:1px solid var(--line); margin-top:14px; padding-top:12px; }
+.action-tabs { display:flex; gap:3px; padding:4px; margin:12px 0; background:#061f243e; border:1px solid #bba57430; border-radius:7px; }
+.action-tabs button { flex:1; background:none; border:0; border-radius:4px; color:#b4c4b5; min-height:36px; font-size:11px; cursor:pointer; }
+.action-tabs button.selected { background:#d9c18c; color:#253e34; }
+.game-shell .hud-panel .build-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.game-shell .hud-panel .build-row .btn { width:100%; min-width:0; min-height:77px; padding:10px 7px; font-size:11px; justify-content:center; }
+.build-row .btn>span:first-child { display:flex; align-items:center; justify-content:center; gap:6px; }
+.build-row .game-icon { width:19px; height:19px; }
+.game-shell .hud-panel .supply-line { font-size:10px; margin:14px 0 10px; }
+.game-shell .hud-panel .resource-icon { width:21px; height:21px; }
+.game-shell .hud-panel .trade-row { gap:4px; }
+.game-shell .hud-panel .trade-chip { padding:5px; min-width:30px; border-radius:5px; color:#e6d9b5; border-color:#bca77540; background:#ffffff05; }
+.game-shell .hud-panel .trade-chip-active { background:#b8a56b35; border-color:#ddbb77; }
+.game-shell .hud-panel .dice-roll-btn { width:100%; min-height:46px; justify-content:center; }
+.dice-result { display:flex; justify-content:center; align-items:center; gap:10px; padding:12px; margin:0; background:#06232855; border:1px solid var(--line); border-radius:7px; }
+.die-face { width:42px; height:42px; padding:0; background:#f4ecd5; object-fit:contain; border-radius:7px; }
+.dice-sum { font:30px Georgia,serif; padding-left:12px; color:#e4c68f; }
+.dice-sum.red { color:#eb8e73; }
+.game-shell .roll-history { margin:8px 0; justify-content:center; }
+.game-shell .roll-chip { min-width:22px; padding:1px 5px; font-size:10px; }
+.turn-footer { flex-shrink:0; padding:13px 18px 17px; border-top:1px solid var(--line); background:#103237; }
+.game-shell .hud-panel .turn-finish { position:static; width:100%; margin:0; min-height:43px; justify-content:space-between; }
+.game-shell .hud-details { border-top:1px solid var(--line); margin-top:16px; padding-top:14px; }
+.game-shell .hud-details summary { color:#b1c2b3; font-size:10px; letter-spacing:.2px; cursor:pointer; }
+.game-shell .bank-line { display:flex; flex-wrap:wrap; justify-content:space-between; font-size:10px; }
+.game-shell .bank-line .resource-icon { width:16px; height:16px; }
+.dev-card-name { display:flex; gap:6px; align-items:center; }
+.dev-card-name .game-icon { width:20px; height:20px; color:#d7bc82; }
+.dev-card-row { gap:8px; font-size:11px; }
+.game-shell .played-card-announcement { position:absolute; left:calc(50% - 45px); top:140px; transform:translateX(-50%); width:256px; text-align:center; padding:24px; color:#314639; background:linear-gradient(140deg,#f5e9cc,#daccaa); border:2px solid #b3965b; border-radius:10px; box-shadow:0 20px 70px #001c25b3,inset 0 0 0 5px #ffffff30; z-index:19; }
+.played-card-announcement .eyebrow { font-size:8px; color:#866a36; }
+.played-card-symbol { margin-top:20px; }
+.played-card-symbol .game-icon { width:54px; height:54px; }
+.played-card-announcement h2 { font:25px Georgia,serif; margin:12px 0; }
+.played-card-announcement p { font-size:12px; }
+.played-card-announcement small { font-size:11px; line-height:1.6; }
+.card-dismiss { position:absolute; top:4px; right:7px; border:0; background:none; color:#635239; padding:4px 8px; font-size:24px; cursor:pointer; }
+.table-hands-dialog { border:0; padding:0; background:transparent; color:var(--text); max-width:calc(100vw - 24px); }
+.table-hands-dialog::backdrop { background:#031c25bb; backdrop-filter:blur(4px); }
+.table-hand-summary { border-top:1px solid var(--line); padding-top:12px; }
+.table-hand-summary strong { font:17px Georgia,serif; }
+.table-hand-summary>div { display:flex; justify-content:space-between; margin-top:10px; }
+.table-hand-summary>div>span { display:flex; align-items:center; gap:6px; }
+
+@media(min-width:1550px) { .game-shell { grid-template-columns:230px minmax(0,1fr) 330px; gap:0 18px; } .game-shell .player-rail { margin-left:24px; } .game-shell .hud-panel { margin-right:24px; } .action-panel-body { padding:22px; } .resource-card { min-height:101px; } .resource-card .resource-icon { width:40px; height:40px; } }
+@media(max-height:780px) and (min-width:901px) { .game-shell .player-rail { gap:10px; margin-top:18px; } .game-shell .player-rail .hand-row { padding:8px 10px; gap:4px; } .game-shell .player-rail .hands { gap:6px; } .soundboard { margin-top:0; padding:10px; } .soundboard-heading { margin-bottom:8px; } .sound-volume { margin-top:5px; } .game-shell .resource-tray { margin-bottom:15px; } .resource-card { min-height:79px; } }
+@media(max-width:1200px) and (min-width:901px) { .game-shell { grid-template-columns:180px minmax(0,1fr) 278px; gap:0 7px; } .game-shell .player-rail { margin-left:12px; } .game-shell .hud-panel { margin-right:12px; } .action-panel-body { padding:14px; } .hand-card-row { grid-template-columns:1fr; gap:9px; } .development-cards { border-left:0; padding-left:0; grid-template-columns:repeat(auto-fit,minmax(70px,1fr)); } .development-card { min-height:55px; padding:6px; } .development-empty { min-height:44px; } .development-empty span { display:none; } .resource-card { min-height:65px; } .player-turn-label { display:none; } }
+@media(max-width:900px) {
+  .game-shell { position:relative; inset:auto; min-height:100dvh; height:auto; overflow:visible; grid-template-columns:minmax(0,1fr); grid-template-rows:60px auto clamp(275px,36dvh,360px) auto auto auto auto; gap:12px; padding:0 12px 20px; }
+  .game-shell .hud-top { grid-row:1; grid-column:1; position:sticky; top:0; margin:0 -12px; padding:8px 12px; height:60px; gap:7px; z-index:30; }
+  .game-shell .hud-top .btn { min-height:34px; font-size:10px; padding:6px 8px; }
+  .game-shell .hud-brand { font-size:14px; letter-spacing:1px; }
+  .game-shell .hud-brand img { width:24px; height:24px; }
+  .game-shell .hud-seed { display:none; }
+  .game-shell .hud-seat { font-size:9px; max-width:100px; }
+  .game-shell .player-rail { display:contents; }
+  .game-shell .rail-title { display:none; }
+  .game-shell .player-rail .hands { grid-column:1; grid-row:2; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
+  .game-shell .player-rail .hands:has(.hand-row:nth-child(3):last-child) { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .game-shell .player-rail .hand-row { grid-template-columns:6px minmax(0,1fr) auto; padding:8px 6px; gap:4px; }
+  .game-shell .player-rail .chip-dot { width:6px; height:6px; }
+  .game-shell .hand-name { font-size:10px; }
+  .game-shell .hand-vp { font-size:11px; }
+  .game-shell .player-rail .hand-res { display:none; }
+  .player-turn-label { display:none; }
+  .player-card-count { font-size:8px; }
+  .game-shell .game-canvas { grid-column:1; grid-row:3; height:100%; width:100%; }
+  .game-shell .turn-banner { grid-column:1; grid-row:3; font-size:10px; margin-top:0; padding:7px 12px; }
+  .game-shell .hud-bottom { display:none; }
+  .canvas-controls { right:0; bottom:0; }
+  .board-inspect { grid-column:1; grid-row:3; margin-bottom:46px; }
+  .game-shell .resource-tray { grid-column:1; grid-row:4; margin:0; padding:10px; }
+  .hand-card-row { grid-template-columns:1fr; gap:10px; }
+  .resource-card { min-height:75px; padding:8px; }
+  .resource-card strong { font-size:26px; }
+  .resource-card .resource-icon { width:30px; height:30px; }
+  .resource-card>span { font-size:7px; letter-spacing:.5px; }
+  .development-cards { border-left:0; padding-left:0; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); }
+  .development-card { min-height:64px; padding:8px; }
+  .development-empty { min-height:45px; }
+  .development-empty>div { display:flex; align-items:center; gap:8px; }
+  .development-empty strong { font-size:12px; }
+  .development-empty span { margin-top:0; font-size:9px; }
+  .development-empty .game-icon { width:22px; height:22px; }
+  .game-shell .hud-panel { grid-column:1; grid-row:5; margin:0; width:100%; max-height:none; overflow:visible; }
+  .action-panel-body { overflow:visible; padding:16px; }
+  .game-shell .hud-panel .setup-guide { display:block; }
+  .game-shell .hud-panel .build-row { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .game-shell .hud-panel .build-row .btn { min-height:73px; }
+  .turn-footer { position:sticky; bottom:0; border-radius:0 0 10px 10px; z-index:12; }
+  .soundboard { grid-column:1; grid-row:6; margin:0; padding:14px; }
+  .soundboard-heading small { font-size:10px; }
+  .soundboard-transport { max-width:100%; }
+  .soundboard select { min-height:38px; font-size:12px; }
+  .soundboard-grid { margin-top:10px; gap:8px; }
+  .soundboard-button { min-height:36px; font-size:11px; }
+  .sound-volume { margin-top:10px; }
+  .last-card-note { grid-column:1; grid-row:7; }
+  .game-shell .played-card-announcement { position:fixed; left:50%; top:150px; max-width:88%; }
+}
+@media(max-width:480px) { .game-shell .hud-brand span { display:none; } .game-shell .hud-panel .build-row { grid-template-columns:1fr 1fr; } .tray-label>span:last-child { font-size:8px; } .resource-cards { gap:5px; } .resource-card { padding:7px 6px; } .resource-card strong { font-size:24px; } .resource-card .resource-icon { width:25px; height:25px; } .development-empty>div { display:block; } .development-empty span { margin-top:3px; } }

@@ -1,81 +1,39 @@
+import { useState } from 'react'
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { MILESTONES, ART_TRACK } from '#/data/milestones'
-
 export const Route = createFileRoute('/')({ component: Home })
-
-const statusLabel = { done: 'done', next: 'next up', todo: 'planned' } as const
-
 function Home() {
-  const done = MILESTONES.filter((m) => m.status === 'done').length
-
+  const [players, setPlayers] = useState<3 | 4>(4)
   return (
-    <main className="landing">
-      <section className="hero">
-        <p className="hero-kicker">an unofficial fan project · three.js · tanstack start · boardgame.io</p>
-        <h1>
-          The island of <span className="accent">CATAN</span>
-        </h1>
-        <p className="hero-sub">
-          A 3D browser adaptation of the classic settler’s game — roll, build, trade and race to
-          ten victory points on a procedurally generated hex island.
-        </p>
-        <div className="hero-actions">
-          <Link to="/game" className="btn btn-primary">
-            ▶ Enter the island
-          </Link>
-          <Link to="/rules" className="btn">
-            📖 Read the rules
-          </Link>
-          <a className="btn" href="/PRD.md" target="_blank" rel="noreferrer">
-            📋 PRD
-          </a>
+    <main className="island-home">
+      <nav className="home-nav" aria-label="Main navigation">
+        <a href="/" className="island-wordmark"><img src="/assets/astra/ui/crest.svg" alt="" />CATAN <small>THE ISLAND</small></a>
+        <div><Link to="/rules">How to play</Link><Link to="/online" search={{}} className="btn btn-small">Gather your friends ↗</Link></div>
+      </nav>
+      <section className="island-hero">
+        <img className="island-hero-art" src="/assets/astra/concept/island.png" alt="A handcrafted hexagonal island with forests, golden fields and little settlements in a turquoise sea" fetchPriority="high" />
+        <div className="island-hero-shade" />
+        <div className="island-hero-copy">
+          <p className="eyebrow">A little island. Endless possibilities.</p>
+          <h1>Make yourself<br /><em>at home.</em></h1>
+          <p>Lay the first road. Find a good neighbor.<br />Turn a handful of resources into a world of your own.</p>
+          <div className="home-play-card">
+            <div className="home-play-heading"><span>YOUR TABLE</span><span>3–4 PLAYERS · 10 POINTS TO WIN</span></div>
+            <div className="count-picker" role="radiogroup" aria-label="Number of local players">
+              <span>Local players</span>
+              {[3, 4].map(n => <button key={n} role="radio" aria-checked={players === n} className={`count-chip ${players === n ? 'count-chip-active' : ''}`} onClick={() => setPlayers(n as 3 | 4)}>{n}</button>)}
+            </div>
+            <Link to="/game" search={{ players }} className="btn btn-primary home-start">Set sail · Play locally <span>→</span></Link>
+            <Link to="/online" search={{}} className="home-online">Friends in different places? <strong>Play online ↗</strong></Link>
+          </div>
+          <p className="home-caption">One shared screen for local play. Private hands online.</p>
         </div>
-        <p className="hero-progress">
-          build progress · {done}/{MILESTONES.length} milestones
-        </p>
+        <span className="hero-edition">THE TABLETOP COLLECTION <span>01 / THE ISLAND</span></span>
       </section>
-
-      <section className="grid">
-        <div>
-          <h2>Roadmap</h2>
-          <ul className="milestones">
-            {MILESTONES.map((m) => (
-              <li key={m.id} className={`ms ms-${m.status}`}>
-                <span className="ms-id">{m.id}</span>
-                <span className="ms-body">
-                  <strong>{m.title}</strong>
-                  <small>{m.detail}</small>
-                </span>
-                <span className="ms-status">{statusLabel[m.status]}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div>
-          <h2>Art direction · GPT Astra</h2>
-          <p className="muted">
-            Look &amp; feel is driven by generated art that drops into asset slots through a
-            manifest — the procedural placeholder island you see today is the fallback.
-          </p>
-          <ul className="milestones">
-            {ART_TRACK.map((m) => (
-              <li key={m.id} className={`ms ms-${m.status}`}>
-                <span className="ms-id">{m.id}</span>
-                <span className="ms-body">
-                  <strong>{m.title}</strong>
-                  <small>{m.detail}</small>
-                </span>
-                <span className="ms-status">{statusLabel[m.status]}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      <section className="home-how" aria-label="The adventure in three steps">
+        <div className="home-how-intro"><p className="eyebrow">Simple beginnings</p><h2>Every great island<br />starts with a road.</h2><Link to="/rules">Learn the rules →</Link></div>
+        {[['01', 'Gather', 'Roll the dice. Your forests, fields and hills produce the resources that bring your plans to life.', 'wood'], ['02', 'Trade', 'Make a deal with your neighbors, or take your goods to a harbor. A little cooperation goes a long way.', 'grain'], ['03', 'Build', 'Connect settlements, raise cities and claim the longest road. Reach ten points on your turn to win.', 'ore']].map(([n,title,body,icon]) => <article key={n}><span className="how-number">{n}</span><img src={`/assets/astra/ui/${icon}.svg`} alt="" /><h3>{title}</h3><p>{body}</p></article>)}
       </section>
-
-      <footer className="landing-footer">
-        Fan re-implementation for personal &amp; educational use. Catan™ is a trademark of Catan
-        Studio / Asmodee — this project is not affiliated.
-      </footer>
+      <footer className="home-footer"><span>Made for evenings around a table.</span><small>Unofficial, non-commercial fan project. Catan™ belongs to Catan Studio / Asmodee. Not affiliated.</small></footer>
     </main>
   )
 }

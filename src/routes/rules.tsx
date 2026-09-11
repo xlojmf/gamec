@@ -12,10 +12,10 @@ function RulesPage() {
         </Link>
         <h1>Rules of the Island</h1>
         <p className="muted">
-          Base game, 3–4 players · the implementation contract for milestones M6–M11 · full PRD
-          in <code>PRD.md</code>
+          Gather, trade and build. Everything you need for your first voyage, from the opening settlement to ten victory points.
         </p>
       </header>
+      <nav className="rules-nav" aria-label="Rules sections">{RULES.map(section => <a key={section.id} href={`#${section.id}`}>{section.title}</a>)}</nav>
 
       {RULES.map((section) => (
         <section key={section.id} id={section.id} className="rule-section">

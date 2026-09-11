@@ -613,7 +613,7 @@ describe('development cards (M11)', () => {
     expect(mainMoves.buyDevCard({ G: G4, ctx: ctx0 })).toBe(INVALID_MOVE)
   })
 
-  it('play restrictions: not this turn\'s card, one per turn, never VP cards, after the roll', () => {
+  it('play restrictions: not this turn\'s card, one per turn, never VP cards, before or after the roll', () => {
     const G = mainG(11, [9, 9, 9, 9, 9])
     G.devHands[0] = [{ card: 'knight', boughtTurn: ctx0.turn }] // bought this turn
     expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBe(INVALID_MOVE)
@@ -623,12 +623,12 @@ describe('development cards (M11)', () => {
 
     G.devHands[0] = [{ card: 'knight', boughtTurn: 0 }]
     G.rolled = false
-    expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBe(INVALID_MOVE)
-
-    G.rolled = true
-    const board = generateBoard(11)
+    // official rules: a dev card may be played BEFORE the roll (e.g. a Knight)
     expect(mainMoves.playDevCard({ G, ctx: ctx0 }, 0)).toBeUndefined()
     expect(G.devPlayedAtTurn).toBe(ctx0.turn)
+    expect(G.robberStep).toBe('move')
+
+    const board = generateBoard(11)
     mainMoves.moveRobber({ G, ctx: ctx0, random: fakeRandom }, board.tiles.find((t) => t.id !== G.robberTileId)!.id)
     if (G.robberStep === 'steal') mainMoves.steal({ G, ctx: ctx0, random: fakeRandom }, G.stealTargets![0])
 
@@ -1017,3 +1017,389 @@ function fnSpy() {
   const fn = (...args: unknown[]) => calls.push(args)
   return { fn, calls }
 }
+
+describe('playerView — hidden information (M12)', () => {
+  const seed = 11
+  const base = CatanGame.setup({}, { seed })
+  // give players asymmetric hands & dev cards
+  const G: GameState = structuredClone(base)
+  G.hands[0] = { wood: 3, brick: 1, grain: 0, wool: 2, ore: 0 }
+  G.hands[1] = { wood: 0, brick: 4, grain: 2, wool: 0, ore: 1 }
+  G.devHands[1] = [{ card: 'knight', boughtTurn: 3 }]
+  const view = (playerID: string | null | undefined) =>
+    (CatanGame.playerView as (ctx: { G: GameState; playerID?: string | null }) => GameState)({
+      G,
+      playerID,
+    })
+
+  it('keeps own hand and dev cards visible', () => {
+    const v = view('1')
+    expect(v.hands[1]).toEqual(G.hands[1])
+    expect(v.devHands[1]).toEqual(G.devHands[1])
+  })
+
+  it('masks other players to empty hands but reports totals', () => {
+    const v = view('1')
+    expect(v.hands[0]).toEqual(emptyResourceCounts())
+    expect(v.devHands[0]).toEqual([])
+    expect(v.handSizes).toEqual([6, 7, 0, 0])
+    expect(v.devHandSizes).toEqual([0, 1, 0, 0])
+  })
+
+  it('masks the deck order for everyone', () => {
+    const v = view('0')
+    expect(v.devDeck.length).toBe(G.devDeck.length)
+    expect(new Set(v.devDeck).size).toBe(1)
+  })
+
+  it('observers see no hands at all', () => {
+    const v = view(null)
+    expect(v.hands.every((h) => totalCards(h) === 0)).toBe(true)
+    expect(v.handSizes).toEqual([6, 7, 0, 0])
+  })
+
+  it('public state (buildings, bank, seed) passes through untouched', () => {
+    const v = view('2')
+    expect(v.seed).toBe(G.seed)
+    expect(v.buildings).toEqual(G.buildings)
+    expect(v.bank).toEqual(G.bank)
+    expect(v.log).toEqual(G.log)
+  })
+
+  it('hotseat factory strips playerView (open information)', () => {
+    expect('playerView' in createCatanGame(seed)).toBe(false)
+  })
+})
+
+describe('opening roll & room size', () => {
+  const seed = 31
+  const G0 = CatanGame.setup({}, { seed })
+
+  it('setup honors numPlayers=3 (hands, devHands, knights, opening rolls)', () => {
+    const G3 = CatanGame.setup({}, { seed, numPlayers: 3 })
+    expect(G3.numPlayers).toBe(3)
+    expect(G3.hands).toHaveLength(3)
+    expect(G3.devHands).toHaveLength(3)
+    expect(G3.playedKnights).toHaveLength(3)
+    expect(G3.openingRolls).toEqual([null, null, null])
+  })
+
+  it('openingRoll records the throw, animates the dice and ends the turn', () => {
+    const G = structuredClone(G0)
+    let ended = false
+    const moves = CatanGame.phases.openingRoll!.moves as {
+      openingRoll: (args: unknown, ...a: unknown[]) => unknown
+    }
+    const out = moves.openingRoll({
+      G,
+      ctx: { currentPlayer: '0', turn: 1 },
+      playerID: '0',
+      random: { Die: () => 3 },
+      events: { endTurn: () => (ended = true) },
+    })
+    expect(out).toBeUndefined() // not INVALID_MOVE
+    expect(G.openingRolls[0]).toBe(6)
+    expect(G.lastRoll).toMatchObject({ die1: 3, die2: 3, sum: 6, nonce: 1 })
+    expect(ended).toBe(true)
+  })
+
+  it('ties re-roll until unique (official rule)', () => {
+    const G = structuredClone(G0)
+    G.openingRolls[0] = 6
+    const queue = [3, 3, 5, 5] // first throw ties 6, re-roll lands 10
+    let i = 0
+    const moves = CatanGame.phases.openingRoll!.moves as {
+      openingRoll: (args: unknown, ...a: unknown[]) => unknown
+    }
+    moves.openingRoll({
+      G,
+      ctx: { currentPlayer: '1', turn: 2 },
+      playerID: '1',
+      random: { Die: () => queue[i++ % queue.length] },
+      events: { endTurn: () => {} },
+    })
+    expect(G.openingRolls[1]).toBe(10)
+  })
+
+  it('the last roll crowns the highest total as firstPlayer', () => {
+    const G = structuredClone(G0)
+    G.openingRolls = [6, 10, 4, null]
+    const moves = CatanGame.phases.openingRoll!.moves as {
+      openingRoll: (args: unknown, ...a: unknown[]) => unknown
+    }
+    moves.openingRoll({
+      G,
+      ctx: { currentPlayer: '3', turn: 4 },
+      playerID: '3',
+      random: { Die: () => 2 },
+      events: { endTurn: () => {} },
+    })
+    expect(G.firstPlayer).toBe(1)
+  })
+
+  it('rejects double rolls and out-of-turn rolls', () => {
+    const G = structuredClone(G0)
+    G.openingRolls[0] = 6
+    const moves = CatanGame.phases.openingRoll!.moves as {
+      openingRoll: (args: unknown, ...a: unknown[]) => unknown
+    }
+    expect(
+      moves.openingRoll({
+        G: structuredClone(G),
+        ctx: { currentPlayer: '1', turn: 2 },
+        playerID: '0',
+        random: { Die: () => 1 },
+        events: { endTurn: () => {} },
+      }),
+    ).toBe(INVALID_MOVE)
+  })
+
+  it('the setup draft snakes from the opening-roll winner', () => {
+    const order = CatanGame.phases.setup.turn.order
+    const G = { ...structuredClone(G0), numPlayers: 4, firstPlayer: 2 }
+    // placement 0 comes from `first`; `next` runs after each increment, so
+    // setupPlacements === the index of the placement being picked
+    expect(order.first({ G } as never)).toBe(2)
+    const seq = [3, 0, 1, 1, 0, 3, 2] // players for placements 1..7 (snake: 2,3,0,1 then back 1,0,3,2)
+    seq.forEach((p, i) =>
+      expect(order.next({ G: { ...G, setupPlacements: i + 1 } } as never)).toBe(p),
+    )
+  })
+
+  it('setup endIf scales with room size', () => {
+    const endIf = CatanGame.phases.setup.endIf as (a: { G?: GameState; ctx?: unknown }) => unknown
+    const G3 = CatanGame.setup({}, { seed, numPlayers: 3 })
+    expect(endIf({ G: { ...G3, setupPlacements: 5 } })).toBeFalsy()
+    expect(endIf({ G: { ...G3, setupPlacements: 6 } })).toBeTruthy()
+  })
+
+  it('hotseat factory skips the opening phase; the server game ships it', () => {
+    expect('openingRoll' in CatanGame.phases).toBe(true)
+    expect('openingRoll' in createCatanGame(seed).phases).toBe(false)
+  })
+})
+
+describe('player names (multiplayer aliases)', () => {
+  const seed = 41
+  const setName = CatanGame.phases.main.moves.setPlayerName as (
+    a: unknown,
+    ...r: unknown[]
+  ) => unknown
+
+  it('setup defaults to the color names, sized to the room', () => {
+    expect(CatanGame.setup({}, { seed }).playerNames).toEqual(['Red', 'Blue', 'Orange', 'White'])
+    expect(CatanGame.setup({}, { seed, numPlayers: 3 }).playerNames).toEqual(['Red', 'Blue', 'Orange'])
+  })
+
+  it('setPlayerName rebrands the seat on its own turn (trimmed, ≤24 chars)', () => {
+    const G = CatanGame.setup({}, { seed })
+    expect(setName({ G: structuredClone(G), ctx: { currentPlayer: '1' }, playerID: '0' }, 'Alice')).toBe(
+      INVALID_MOVE,
+    )
+    const G2 = structuredClone(G)
+    expect(setName({ G: G2, ctx: { currentPlayer: '0' }, playerID: '0' }, '  Alice  ')).toBeUndefined()
+    expect(G2.playerNames[0]).toBe('Alice')
+  })
+
+  it('empty or unchanged names are rejected', () => {
+    const G = CatanGame.setup({}, { seed })
+    G.playerNames[1] = 'Bob'
+    expect(setName({ G: structuredClone(G), ctx: { currentPlayer: '1' }, playerID: '1' }, '   ')).toBe(INVALID_MOVE)
+    expect(setName({ G: structuredClone(G), ctx: { currentPlayer: '1' }, playerID: '1' }, 'Bob')).toBe(INVALID_MOVE)
+  })
+
+  it('engine log lines use the live name', () => {
+    const G = CatanGame.setup({}, { seed })
+    G.playerNames[0] = 'Alice'
+    G.robberStep = 'move'
+    const moveRobber = CatanGame.phases.main.moves.moveRobber as (a: unknown, ...r: unknown[]) => unknown
+    const board = generateBoard(G.seed)
+    const other = board.tiles.find((t) => t.id !== G.robberTileId)!.id
+    moveRobber({ G, ctx: { currentPlayer: '0' }, events: { endTurn: () => {} } } as never, other)
+    expect(G.log.some((line) => line.startsWith('Alice moved the robber'))).toBe(true)
+  })
+})
+
+describe('rules refinements (official timing)', () => {
+  const seed = 51
+
+  it('dev cards are playable BEFORE the roll (e.g. a Knight)', () => {
+    const g = structuredClone(CatanGame.setup({}, { seed }))
+    g.rolled = false
+    g.robberStep = null
+    g.devHands[0] = [{ card: 'knight', boughtTurn: -1 }]
+    g.devPlayedAtTurn = -1
+    const play = CatanGame.phases.main.moves.playDevCard as (a: unknown, ...r: unknown[]) => unknown
+    expect(play({ G: g, ctx: { currentPlayer: '0', turn: 9 } } as never, 0)).toBeUndefined()
+    expect(g.robberStep).toBe('move') // knight reuses the robber flow; roll waits
+  })
+
+  it('playerView reveals everything once the game is over', () => {
+    const G = CatanGame.setup({}, { seed })
+    G.hands[1] = { wood: 2, brick: 0, grain: 1, wool: 0, ore: 0 }
+    const view = (CatanGame as { playerView: (c: unknown) => GameState }).playerView
+    const revealed = view({ G, ctx: { gameover: { winner: 0 } }, playerID: '0' })
+    expect(revealed.hands[1]).toEqual(G.hands[1]) // no masking after the win
+    const live = view({ G, ctx: {}, playerID: '0' })
+    expect(totalCards(live.hands[1])).toBe(0) // still hidden mid-game
+  })
+
+  it('a 10-VP seat only wins on its own turn', () => {
+    const G = CatanGame.setup({}, { seed })
+    // seat 1: 3 settlements + 2 cities = 7 ... push over 10 with awards
+    G.longestRoad = { player: 1, size: 5 }
+    G.largestArmy = { player: 1, size: 3 }
+    G.buildings.vertices = {
+      a: { player: 1, type: 'settlement' }, b: { player: 1, type: 'settlement' },
+      c: { player: 1, type: 'settlement' }, d: { player: 1, type: 'city' },
+      e: { player: 1, type: 'city' },
+    } as never
+    const endIf = CatanGame.endIf as (a: { G?: GameState; ctx?: { currentPlayer?: string } }) => unknown
+    expect(endIf({ G, ctx: { currentPlayer: '0' } })).toBeUndefined() // someone else acting
+    expect(endIf({ G, ctx: { currentPlayer: '1' } })).toEqual({ winner: 1 }) // their turn
+  })
+})
+
+describe('trade input integrity', () => {
+  it('rejects fractional and non-finite quantities without changing cards or stages', () => {
+    for (const quantity of [0.5, NaN, Infinity, -1]) {
+      const G = mainG(11, [5, 5, 5, 5, 5])
+      G.hands[1] = { wood: 5, brick: 5, wool: 5, grain: 5, ore: 5 }
+      const before = structuredClone(G)
+      expect(mainMoves.proposeTrade({ G, ctx: ctx0 }, 1, { wood: quantity }, { ore: 1 })).toBe(INVALID_MOVE)
+      expect(G).toEqual(before)
+      expect(mainMoves.proposeTrade({ G, ctx: ctx0 }, 1, { wood: 1 }, { ore: quantity })).toBe(INVALID_MOVE)
+      expect(G).toEqual(before)
+    }
+  })
+  it('rejects invalid partner indices instead of accessing a missing hand', () => {
+    const G = mainG(11, [5, 5, 5, 5, 5])
+    for (const partner of [0.5, NaN, Infinity, -1, 4]) {
+      expect(mainMoves.proposeTrade({ G, ctx: ctx0 }, partner, { wood: 1 }, { ore: 1 })).toBe(INVALID_MOVE)
+    }
+    expect(G.pendingTrade).toBeNull()
+  })
+  it('keeps the complete voyage journal beyond thirty events', () => {
+    const G = mainG(11, [0, 0, 0, 0, 0])
+    G.log = Array.from({length: 35}, (_, i) => `Earlier event ${i}`)
+    G.hands[0].wood = 4
+    G.bank.ore = 19
+    mainMoves.tradeBank({ G, ctx: ctx0 }, 'wood', 'ore')
+    expect(G.log).toHaveLength(36)
+    expect(G.log.at(-1)).toBe('Earlier event 34')
+  })
+})
+
+describe('finishing the art-track interactions', () => {
+  it('undo refunds a paid road and restores awards, but not after another action', () => {
+    const G = mainG(11, [9, 9, 9, 9, 9])
+    const edge = validRoadEdges(G, 0)[0]
+    const before = structuredClone({ buildings: G.buildings, hands: G.hands, bank: G.bank, award: G.longestRoad })
+    mainMoves.placeRoad({ G, ctx: ctx0 }, edge)
+    expect(G.lastBuild?.kind).toBe('road')
+    expect(mainMoves.undoBuild({ G, ctx: {...ctx0, currentPlayer:'1'} })).toBe(INVALID_MOVE)
+    expect(mainMoves.undoBuild({ G, ctx: ctx0 })).toBeUndefined()
+    expect({buildings:G.buildings,hands:G.hands,bank:G.bank,award:G.longestRoad}).toEqual(before)
+    expect(mainMoves.undoBuild({ G, ctx: ctx0 })).toBe(INVALID_MOVE)
+    mainMoves.placeRoad({ G, ctx: ctx0 }, edge)
+    mainMoves.buyDevCard({ G, ctx: ctx0 })
+    expect(mainMoves.undoBuild({ G, ctx: ctx0 })).toBe(INVALID_MOVE)
+  })
+  it('undoing a city restores its settlement and exact cost', () => {
+    const G = mainG(11, [9,9,9,9,9])
+    const vertex = validCityVertices(G,0)[0]
+    const before = structuredClone({hand:G.hands[0],bank:G.bank})
+    mainMoves.upgradeCity({G,ctx:ctx0},vertex)
+    mainMoves.undoBuild({G,ctx:ctx0})
+    expect(G.buildings.vertices[vertex]).toEqual({player:0,type:'settlement'})
+    expect({hand:G.hands[0],bank:G.bank}).toEqual(before)
+  })
+  it('can finish Road Building before rolling without ending the turn', () => {
+    const G=mainG(11,[0,0,0,0,0]); G.rolled=false
+    giveDev(G,0,'roadBuilding')
+    mainMoves.playDevCard({G,ctx:ctx0},0)
+    const edge=connectedRoadEdges(G,0)[0]
+    expect(mainMoves.placeFreeRoad({G,ctx:ctx0},edge)).toBeUndefined()
+    expect(mainMoves.finishRoadBuilding({G,ctx:ctx0})).toBeUndefined()
+    expect(G.rolled).toBe(false)
+    expect(G.devStep).toBeNull()
+    expect(G.roadBuildingLeft).toBe(0)
+    expect(G.buildings.edges[edge]).toEqual({player:0})
+  })
+  it('multiple recipients can decline independently, and one acceptance pays only once', () => {
+    const G=mainG(11,[5,5,5,5,5])
+    for(let p=1;p<4;p++)G.hands[p]={wood:5,brick:5,wool:5,grain:5,ore:5}
+    const before=economy(G)
+    mainMoves.proposeTrade({G,ctx:ctx0},[1,2,3],{wood:2},{ore:1})
+    expect(G.pendingTrade?.partners).toEqual([1,2,3])
+    respondMoves.declineTrade({G,ctx:ctxRespond(1),playerID:'1'})
+    expect(G.pendingTrade?.partners).toEqual([2,3])
+    expect(respondMoves.acceptTrade({G,ctx:ctxRespond(1),playerID:'1'})).toBe(INVALID_MOVE)
+    respondMoves.acceptTrade({G,ctx:ctxRespond(3),playerID:'3'})
+    expect(G.pendingTrade).toBeNull()
+    expect(G.hands[0].wood).toBe(3)
+    expect(G.hands[3].wood).toBe(7)
+    expect(G.hands[2].wood).toBe(5)
+    expect(economy(G)).toBe(before)
+    expect(respondMoves.acceptTrade({G,ctx:ctxRespond(2),playerID:'2'})).toBe(INVALID_MOVE)
+  })
+  it('counter-offers reverse the responding party and require renewed consent', () => {
+    const G=mainG(11,[5,5,5,5,5]); G.hands[1]={wood:5,brick:5,wool:5,grain:5,ore:5}
+    const before=economy(G)
+    mainMoves.proposeTrade({G,ctx:ctx0},1,{wood:2},{ore:1})
+    expect(respondMoves.counterTrade({G,ctx:ctxRespond(1),playerID:'1'},{ore:1},{wood:3})).toBeUndefined()
+    expect(G.hands[0].wood).toBe(5)
+    expect(G.pendingTrade?.partner).toBe(0)
+    expect(G.pendingTrade?.proposer).toBe(1)
+    expect(respondMoves.acceptTrade({G,ctx:ctxRespond(1),playerID:'1'})).toBe(INVALID_MOVE)
+    expect(respondMoves.acceptTrade({G,ctx:ctxRespond(0),playerID:'0'})).toBeUndefined()
+    expect(G.hands[0].wood).toBe(2)
+    expect(G.hands[1].wood).toBe(8)
+    expect(economy(G)).toBe(before)
+  })
+  it('the client exits all response stages after accepting a table offer or a counter', () => {
+    const game = createCatanGame(11)
+    const rich=mainG(11,[5,5,5,5,5])
+    for(let p=1;p<4;p++)rich.hands[p]={wood:5,brick:5,wool:5,grain:5,ore:5}
+    const client=Client({debug:false,numPlayers:4,game:{...game,setup:()=>rich,phases:{...game.phases,setup:{...game.phases.setup,start:false},main:{...game.phases.main,start:true,turn:{...game.phases.main.turn,onBegin:({G}:{G?:GameState})=>{if(G)G.rolled=true;return G}}}}}})
+    client.start()
+    client.updatePlayerID('0'); client.moves.proposeTrade([1,2,3],{wood:1},{ore:1})
+    expect(client.getState()!.ctx.activePlayers).toEqual({'1':'respond','2':'respond','3':'respond'})
+    client.updatePlayerID('2'); client.moves.acceptTrade()
+    expect(client.getState()!.ctx.activePlayers).toBeNull()
+    client.updatePlayerID('0'); client.moves.proposeTrade([1,3],{wood:1},{ore:1})
+    client.updatePlayerID('3'); client.moves.counterTrade({ore:1},{wood:2})
+    expect(client.getState()!.ctx.activePlayers).toEqual({'0':'respond'})
+    client.updatePlayerID('0'); client.moves.acceptTrade()
+    expect(client.getState()!.ctx.activePlayers).toBeNull()
+    client.moves.endTurn()
+    expect(client.getState()!.ctx.currentPlayer).toBe('1')
+    client.stop()
+  })
+})
+
+describe('public development card announcement', () => {
+  it('reveals a played card to every seat while preserving private hands', () => {
+    const G = mainG(11, [5,5,5,5,5])
+    giveDev(G, 0, 'knight')
+    giveDev(G, 0, 'victoryPoint')
+    mainMoves.playDevCard({G, ctx:ctx0}, 0)
+    for (const playerID of ['0','1','2','3',null]) {
+      const visible = (CatanGame.playerView as (a: {G:GameState; playerID:string|null}) => GameState)({G,playerID})
+      expect(visible.lastPlayedCard).toEqual({player:0,card:'knight',turn:ctx0.turn,sequence:1})
+      if (playerID !== '0') {
+        expect(visible.hands[0]).toEqual(emptyResourceCounts())
+        expect(visible.handSizes?.[0]).toBe(25)
+        expect(visible.devHands[0]).toEqual([])
+        expect(visible.devHandSizes?.[0]).toBe(1)
+      }
+    }
+  })
+  it('does not reveal a purchase or an invalid play', () => {
+    const G = mainG(11, [5,5,5,5,5])
+    mainMoves.buyDevCard({G,ctx:ctx0})
+    expect(G.lastPlayedCard).toBeUndefined()
+    mainMoves.playDevCard({G,ctx:ctx0},0)
+    expect(G.lastPlayedCard).toBeUndefined()
+  })
+})

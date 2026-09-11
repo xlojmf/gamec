@@ -8,3 +8,8 @@ preview.log
 .cta.json
 *.md
 !README.md
+
+work
+.env
+.env.*
+!.env.example

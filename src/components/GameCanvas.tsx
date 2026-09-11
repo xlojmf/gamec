@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { GameIcon } from './GameIcon'
 import {
   GameView,
   type BuildMode,
@@ -52,9 +53,12 @@ export function GameCanvas({
 }: GameCanvasProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<GameView | null>(null)
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
-    const view = new GameView(hostRef.current!)
+    let view: GameView
+    try { view = new GameView(hostRef.current!) }
+    catch { setFailed(true); return }
     viewRef.current = view
     return () => {
       view.dispose()
@@ -95,5 +99,12 @@ export function GameCanvas({
     if (production) viewRef.current?.showProduction(production.tileIds)
   }, [production])
 
-  return <div ref={hostRef} className="game-canvas" />
+  return <div ref={hostRef} className="game-canvas" aria-label="Interactive island board">
+    {!failed && <div className="canvas-controls" aria-label="Board camera">
+      <button aria-label="Zoom out" title="Zoom out" onClick={() => viewRef.current?.zoom('out')}>−</button>
+      <button aria-label="Reset board view" title="Reset board view" onClick={() => viewRef.current?.resetCamera()}><GameIcon name="compass" /></button>
+      <button aria-label="Zoom in" title="Zoom in" onClick={() => viewRef.current?.zoom('in')}>+</button>
+    </div>}
+    {failed && <div className="canvas-error" role="alert"><h2>The island could not load.</h2><p>Your browser needs WebGL to draw the board. Enable hardware acceleration or try another browser, then reload.</p><button className="btn" onClick={() => window.location.reload()}>Reload island</button></div>}
+  </div>
 }

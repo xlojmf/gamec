@@ -1,6 +1,11 @@
+import { ResourceIcon } from '#/components/ResourceIcon'
+import { GameAudioProvider, SoundToggle, Soundboard } from '#/components/GameSound'
+import { HandTray } from '#/components/HandTray'
+import { GameIcon } from '#/components/GameIcon'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { Client } from 'boardgame.io/client'
+import { SocketIO } from 'boardgame.io/multiplayer'
 import { GameCanvas, type ProductionReport, type RollTrigger } from '#/components/GameCanvas'
 import {
   PLAYER_COLORS,
@@ -17,6 +22,7 @@ import { randomSeed } from '#/game/rng'
 import { isRobberRoll, type DiceRoll } from '#/game/dice'
 import {
   BUILD_COSTS,
+  CatanGame,
   DEV_CARD_INFO,
   DEV_COST,
   SUPPLY_LIMITS,
@@ -34,6 +40,7 @@ import {
   type BgioState,
 } from '#/game/catan'
 import {
+  RESOURCE_ACCENT,
   RESOURCE_ICONS,
   RESOURCE_LABELS,
   RESOURCES,
@@ -43,43 +50,65 @@ import {
   type Resource,
   type ResourceCounts,
 } from '#/game/terrain'
+import { gameServerHost, loadCreatorToken, loadMpSession, roomsApiBase, type MpSession } from '#/multiplayer/session'
 
-export const Route = createFileRoute('/game')({ component: GamePage })
+export const Route = createFileRoute('/game')({
+  validateSearch: (search: Record<string, unknown>): { match?: string; seat?: number; server?: string; players?: number } => {
+    // numbers may come back as strings after a hard refresh — coerce
+    const num = (v: unknown) =>
+      typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : undefined
+    return {
+      match: typeof search.match === 'string' ? search.match : undefined,
+      seat: num(search.seat),
+      server: typeof search.server === 'string' ? search.server : undefined,
+      players: num(search.players),
+    }
+  },
+  component: GamePage,
+})
 
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0')
 
-/** Pip grid for the HUD dice (col, row in a 3×3 layout). */
-const PIPS: Record<number, [number, number][]> = {
-  1: [[1, 1]],
-  2: [[0, 0], [2, 2]],
-  3: [[0, 0], [1, 1], [2, 2]],
-  4: [[0, 0], [2, 0], [0, 2], [2, 2]],
-  5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]],
-  6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]],
-}
+
+/** Display name for a seat — the game's multiplayer alias, or the color default. */
+const pname = (G: { playerNames?: string[] } | null | undefined, i: number) =>
+  G?.playerNames?.[i] ?? PLAYER_NAMES[i]
 
 /** Static island legend — module-level so no hook ordering can break. */
 const TERRAIN_LEGEND = TERRAIN_COUNTS.map(([terrain, count]) => ({ terrain, count }))
 
 function DieFace({ v }: { v: number }) {
-  return (
-    <span className="die-face" role="img" aria-label={`die showing ${v}`}>
-      {PIPS[v].map(([c, r], i) => (
-        <i key={i} style={{ left: `${15 + c * 35}%`, top: `${15 + r * 35}%` }} />
-      ))}
-    </span>
-  )
+  return <img className="die-face" src={`/assets/astra/ui/dice-${v}.svg`} alt={`Die showing ${v}`} />
 }
 
 type BgioClient = ReturnType<typeof Client>
 
-/** Owns one local boardgame.io client per seed — the whole game's brain. */
-function useCatanClient(seed: number) {
+/** Which brain GamePage owns: a local hotseat island or a server match. */
+export type ClientConfig =
+  | { kind: 'hotseat'; seed: number; numPlayers?: number }
+  | { kind: 'mp'; matchID: string; seat: number; credentials: string; server: string; numPlayers?: number }
+
+/** Owns one boardgame.io client per config — the whole game's brain. */
+function useCatanClient(config: ClientConfig | null) {
   const [state, setState] = useState<BgioState | null>(null)
   const clientRef = useRef<BgioClient | null>(null)
+  /** Multiplayer seats are fixed — moves always dispatch as this player. */
+  const fixedSeat = config?.kind === 'mp' ? config.seat : null
 
   useEffect(() => {
-    const client: BgioClient = Client({ game: createCatanGame(seed), numPlayers: PLAYER_COUNT })
+    if (!config) return
+    const client: BgioClient =
+      config.kind === 'mp'
+        ? Client({
+            debug: false,
+            game: CatanGame,
+            numPlayers: config.numPlayers ?? 4,
+            playerID: String(config.seat),
+            matchID: config.matchID,
+            credentials: config.credentials,
+            multiplayer: SocketIO({ server: config.server }),
+          })
+        : Client({ debug: false, game: createCatanGame(config.seed, config.numPlayers ?? 4), numPlayers: config.numPlayers ?? PLAYER_COUNT })
     client.start()
     clientRef.current = client
     setState(client.getState() as BgioState)
@@ -91,17 +120,17 @@ function useCatanClient(seed: number) {
       client.stop()
       clientRef.current = null
     }
-  }, [seed])
+  }, [config])
 
-  /** Dispatch a move as the given player (hotseat: we act for everyone). */
+  /** Dispatch a move as the given player (hotseat acts for everyone; mp is fixed). */
   const move = useCallback(
     (pid: number, fn: (moves: Record<string, (...args: unknown[]) => unknown>) => void) => {
       const client = clientRef.current
       if (!client) return
-      client.updatePlayerID(String(pid))
+      client.updatePlayerID(String(fixedSeat ?? pid))
       fn(client.moves as Record<string, (...args: unknown[]) => unknown>)
     },
-    [],
+    [fixedSeat],
   )
 
   return { state, move }
@@ -110,11 +139,13 @@ function useCatanClient(seed: number) {
 /** Discard-half overlay: pick exactly `required` cards. */
 function DiscardPanel({
   player,
+  playerName,
   hand,
   required,
   onConfirm,
 }: {
   player: number
+  playerName: string
   hand: ResourceCounts
   required: number
   onConfirm: (cards: Partial<ResourceCounts>) => void
@@ -126,13 +157,13 @@ function DiscardPanel({
       <div className="overlay-card">
         <h3>
           <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[player]) } as React.CSSProperties} />{' '}
-          {PLAYER_NAMES[player]} — discard {required} card{required === 1 ? '' : 's'}
+          {playerName} — discard {required} card{required === 1 ? '' : 's'}
         </h3>
         <div className="discard-grid">
           {RESOURCES.map((r) => (
             <div key={r} className="discard-cell">
               <span className="discard-label">
-                {RESOURCE_ICONS[r]} {RESOURCE_LABELS[r]} ×{hand[r]}
+                {<ResourceIcon resource={r} />} {RESOURCE_LABELS[r]} ×{hand[r]}
               </span>
               <div className="stepper">
                 <button
@@ -168,7 +199,7 @@ function CostTag({ cost, hand }: { cost: Partial<ResourceCounts>; hand: Resource
     <span className="build-cost">
       {RESOURCES.filter((r) => cost[r]).map((r) => (
         <span key={r} className={hand[r] >= (cost[r] ?? 0) ? '' : 'lack'}>
-          {RESOURCE_ICONS[r]}
+          {<ResourceIcon resource={r} />}
           {cost[r]}
         </span>
       ))}
@@ -205,18 +236,29 @@ function Stepper({
 /** Domestic trade composer: pick a partner + terms, then propose. */
 function TradeOfferPanel({
   proposer,
+  names,
   hands,
   onPropose,
   onClose,
+  target,
+  initialGive,
+  initialTake,
 }: {
   proposer: number
-  hands: ResourceCounts[]
-  onPropose: (partner: number, give: Partial<ResourceCounts>, take: Partial<ResourceCounts>) => void
+  /** Seat display names (multiplayer aliases). */
+  names: string[]
+  /** null = hidden hand (multiplayer) — totals unknown, offers capped at 4. */
+  hands: (ResourceCounts | null)[]
+  onPropose: (partner: number | number[], give: Partial<ResourceCounts>, take: Partial<ResourceCounts>) => void
   onClose: () => void
+  target?: number
+  initialGive?: Partial<ResourceCounts>
+  initialTake?: Partial<ResourceCounts>
 }) {
-  const [partner, setPartner] = useState<number | null>(null)
-  const [give, setGive] = useState<Partial<ResourceCounts>>({})
-  const [take, setTake] = useState<Partial<ResourceCounts>>({})
+  const [partner, setPartner] = useState<number | null>(target ?? null)
+  const [give, setGive] = useState<Partial<ResourceCounts>>(initialGive ?? {})
+  const [take, setTake] = useState<Partial<ResourceCounts>>(initialTake ?? {})
+  const ownHand = hands[proposer]!
   const giveTotal = RESOURCES.reduce((n, r) => n + (give[r] ?? 0), 0)
   const takeTotal = RESOURCES.reduce((n, r) => n + (take[r] ?? 0), 0)
   const overlap = RESOURCES.some((r) => (give[r] ?? 0) > 0 && (take[r] ?? 0) > 0)
@@ -227,11 +269,11 @@ function TradeOfferPanel({
       <div className="overlay-card">
         <h3>
           <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[proposer]) } as React.CSSProperties} />{' '}
-          {PLAYER_NAMES[proposer]} — propose a trade
+          {names[proposer]} — propose a trade
         </h3>
         <div className="trade-partners">
           {hands.map((_, p) =>
-            p !== proposer ? (
+            p !== proposer && (target === undefined || target === p) ? (
               <button
                 key={p}
                 className={`chip ${partner === p ? 'chip-active' : ''}`}
@@ -242,31 +284,32 @@ function TradeOfferPanel({
                 }}
               >
                 <span className="chip-dot" />
-                {PLAYER_NAMES[p]}
+                {names[p]}
               </button>
             ) : null,
           )}
+          {target === undefined && <button className={`chip ${partner === -1 ? 'chip-active' : ''}`} onClick={() => {setPartner(-1); setTake({})}}>Anyone at the table</button>}
         </div>
         <div className="trade-grid">
           {RESOURCES.map((r) => (
             <div key={r} className="discard-cell">
               <span className="discard-label">
-                {RESOURCE_ICONS[r]} {RESOURCE_LABELS[r]}
+                {<ResourceIcon resource={r} />} {RESOURCE_LABELS[r]}
                 <span className="muted small">
                   {' '}
-                  you {hands[proposer][r]} · them {partner !== null ? hands[partner][r] : '—'}
+                  you {ownHand[r]} · them {partner !== null ? (hands[partner] ? hands[partner]![r] : '??') : '—'}
                 </span>
               </span>
               <div className="trade-steppers">
                 <Stepper
                   value={give[r] ?? 0}
-                  max={hands[proposer][r]}
+                  max={ownHand[r]}
                   label="give"
                   onChange={(v) => setGive((s) => ({ ...s, [r]: v }))}
                 />
                 <Stepper
                   value={take[r] ?? 0}
-                  max={partner !== null ? hands[partner][r] : 0}
+                  max={partner !== null && hands[partner] ? hands[partner]![r] : 19}
                   label="get"
                   onChange={(v) => setTake((s) => ({ ...s, [r]: v }))}
                 />
@@ -282,7 +325,7 @@ function TradeOfferPanel({
           <button
             className="btn btn-primary"
             disabled={!valid || partner === null}
-            onClick={() => onPropose(partner!, give, take)}
+            onClick={() => onPropose(partner === -1 ? hands.map((_, i) => i).filter(i => i !== proposer) : partner!, give, take)}
           >
             Offer {countsLabel(give)} for {countsLabel(take)}
           </button>
@@ -324,7 +367,7 @@ function YearOfPlentyPanel({
                   disabled={disabled}
                   onClick={() => set(picked === r ? null : r)}
                 >
-                  {RESOURCE_ICONS[r]} <span className="trade-rate">{bank[r]}</span>
+                  {<ResourceIcon resource={r} />} <span className="trade-rate">{bank[r]}</span>
                 </button>
               )
             })}
@@ -341,12 +384,41 @@ function YearOfPlentyPanel({
 }
 
 function GamePage() {
+  const { match: matchParam, server: serverParam, players: playersParam } = Route.useSearch()
   const [seed, setSeed] = useState(() => randomSeed())
-  const { state, move } = useCatanClient(seed)
-  const board = useMemo(() => generateBoard(seed), [seed])
+
+  // multiplayer session (matchID + credentials in sessionStorage, PRD §7):
+  // 'pending' = one render before we can touch sessionStorage (SSR-safe).
+  const [mpSession, setMpSession] = useState<MpSession | null | 'pending'>(matchParam ? 'pending' : null)
+  useEffect(() => {
+    setMpSession(matchParam ? loadMpSession(matchParam) : null)
+  }, [matchParam])
+
+  const clientConfig = useMemo<ClientConfig | null>(() => {
+    if (!matchParam) return { kind: 'hotseat', seed, numPlayers: playersParam ?? 4 }
+    if (mpSession === 'pending' || !mpSession || mpSession.matchID !== matchParam) return null
+    return {
+      kind: 'mp',
+      matchID: mpSession.matchID,
+      seat: mpSession.playerID,
+      credentials: mpSession.credentials,
+      server: gameServerHost(),
+      numPlayers: playersParam ?? 4,
+    }
+  }, [matchParam, mpSession, seed, serverParam, playersParam])
+
+  const { state, move } = useCatanClient(clientConfig)
+  // multiplayer: the board seed comes from the server state, not the URL
+  const board = useMemo(
+    () => generateBoard(state?.G?.seed ?? (matchParam ? 0 : seed)),
+    [state?.G?.seed, matchParam, seed],
+  )
 
   // local view state (animation gating, setup selection, history)
   const [kind, setKind] = useState<BuildKind>(null)
+  const [showTableHands, setShowTableHands] = useState(false)
+  const [actionTab, setActionTab] = useState<'build' | 'trade' | 'cards'>('build')
+  const [dismissedCard, setDismissedCard] = useState(0)
   const [hover, setHover] = useState<HoverInfo | null>(null)
   const [rolling, setRolling] = useState(false)
   const [history, setHistory] = useState<number[]>([])
@@ -354,13 +426,30 @@ function GamePage() {
   const [bankGive, setBankGive] = useState<Resource | null>(null)
   const [bankTake, setBankTake] = useState<Resource | null>(null)
   const [showTradeOffer, setShowTradeOffer] = useState(false)
+  const [counterSeat, setCounterSeat] = useState<number | null>(null)
   /** index of the monopoly card being played (picker open), else null */
   const [monoPick, setMonoPick] = useState<number | null>(null)
+  const [rematching, setRematching] = useState(false)
+  const navigate = useNavigate()
 
   const G = state?.G
+  useEffect(() => { setCounterSeat(null) }, [G?.pendingTrade?.proposer, G?.pendingTrade?.partner])
+  useEffect(() => {
+    if (!G?.lastPlayedCard) return
+    const sequence = G.lastPlayedCard.sequence
+    const timer = window.setTimeout(() => setDismissedCard(sequence), 7000)
+    return () => window.clearTimeout(timer)
+  }, [G?.lastPlayedCard?.sequence])
   const ctx = state?.ctx
   const phase = ctx?.phase ?? 'setup'
   const current = Number(ctx?.currentPlayer ?? 0)
+  // hotseat: everyone acts through one client. multiplayer: only your seat.
+  const seat = clientConfig?.kind === 'mp' ? clientConfig.seat : null
+  const actor = seat ?? current
+  const myTurn = seat === null || seat === current
+  /** other players' hands are masked by playerView in multiplayer */
+  const hiddenHand = (i: number) => seat !== null && i !== seat
+  const handSize = (i: number) => G?.handSizes?.[i] ?? totalCards(G?.hands[i] ?? { wood: 0, brick: 0, grain: 0, wool: 0, ore: 0 })
   const gameover = ctx?.gameover ?? null
 
   // placements from authoritative state → GameCanvas maps
@@ -371,8 +460,24 @@ function GamePage() {
     }),
     [G],
   )
+  // roll animation follows every LIVE roll: any nonce that appears after the
+  // first state sync animates for everyone at once. Only the state replayed on
+  // connect/refresh (the first observed lastRoll) is adopted silently — the
+  // dice never re-throw history when you (re)join mid-game.
+  const rollSync = useRef<{ synced: boolean; nonce: number | null }>({ synced: false, nonce: null })
   const rollTrigger = useMemo<RollTrigger | null>(
-    () => (G?.lastRoll ? { ...G.lastRoll } : null),
+    () => {
+      const lr = G?.lastRoll
+      const sync = rollSync.current
+      if (!G) return null // no state yet — nothing synced
+      if (!sync.synced) {
+        rollSync.current = { synced: true, nonce: lr?.nonce ?? null }
+        return null
+      }
+      if (!lr || lr.nonce === sync.nonce) return null
+      return { ...lr }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [G?.lastRoll],
   )
   const productionReport = useMemo<ProductionReport | null>(
@@ -380,17 +485,62 @@ function GamePage() {
     [G?.lastProduction],
   )
 
-  // roll history follows engine rolls
+  // roll history follows engine rolls (opening rolls are marked seen but kept out)
   const lastNonce = useRef<number | null>(null)
   useEffect(() => {
     const lr = G?.lastRoll
     if (lr && lr.nonce !== lastNonce.current) {
+      const isMain = ctx?.phase === 'main'
       lastNonce.current = lr.nonce
-      setHistory((h) => [lr.sum, ...h].slice(0, 10))
+      if (isMain) setHistory((h) => [lr.sum, ...h].slice(0, 10))
     }
+  }, [G?.lastRoll, ctx?.phase])
+
+  // a triggered animation (own click or a remote roll) holds the UI in
+  // "rolling…" until the dice settle — consistent for every viewer
+  useEffect(() => {
+    if (rollTrigger) setRolling(true)
+  }, [rollTrigger])
+
+  const onRollDone = useCallback(() => {
+    if (G?.lastRoll) rollSync.current = { synced: true, nonce: G.lastRoll.nonce }
+    setRolling(false)
   }, [G?.lastRoll])
 
-  const onRollDone = useCallback(() => setRolling(false), [])
+  /** Creator-only rematch: same room code & seats, brand-new island. */
+  const doRematch = async () => {
+    if (!mpSession || mpSession === 'pending' || !mpSession.roomCode) return
+    const token = loadCreatorToken(mpSession.roomCode)
+    if (!token) return
+    setRematching(true)
+    try {
+      const res = await fetch(`${roomsApiBase()}/rooms/${mpSession.roomCode}/rematch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ creatorToken: token }),
+      })
+      if (!res.ok) throw new Error(String(res.status))
+      // everyone re-takes their seat on the room page (credentials are re-issued)
+      navigate({ to: '/online', search: { code: mpSession.roomCode } })
+    } catch {
+      setRematching(false)
+    }
+  }
+
+  // multiplayer: publish the room alias as this seat's display name. bgio only
+  // lets the active player move, so it lands on our first turn (opening roll).
+  const aliasSynced = useRef(false)
+  useEffect(() => {
+    if (seat === null || !G || !myTurn || aliasSynced.current) return
+    let alias = ''
+    try {
+      alias = (localStorage.getItem('catan-alias') ?? '').replace(/\s+/g, ' ').trim().slice(0, 24)
+    } catch {
+      alias = ''
+    }
+    aliasSynced.current = true
+    if (alias && alias !== G.playerNames?.[seat]) move(seat, (m) => m.setPlayerName(alias))
+  }, [G, seat, myTurn, move])
 
   // bank-trade selections reset whenever the turn moves on
   useEffect(() => {
@@ -415,97 +565,134 @@ function GamePage() {
 
   const onPick = useCallback(
     (target: PickTarget) => {
-      if (!G || !ctx) return
+      if (!G || !ctx || !myTurn) return
       if (target.kind === 'tile') {
-        if (G.robberStep === 'move') move(current, (m) => m.moveRobber(target.id))
+        if (G.robberStep === 'move') move(actor, (m) => m.moveRobber(target.id))
         return
       }
       if (phase === 'setup') {
         if (target.kind === 'vertex') {
           if (validSetupVertices(G).includes(target.id)) setSetupVertex(target.id)
         } else if (setupVertex && validSetupEdges(G, setupVertex).includes(target.id)) {
-          move(current, (m) => m.placeSetup(setupVertex, target.id))
+          move(actor, (m) => m.placeSetup(setupVertex, target.id))
           setSetupVertex(null)
         }
         return
       }
       // main phase: build as the active player (engine validates cost/legality)
-      if (phase === 'main' && G.rolled && !G.robberStep) {
+      if (phase === 'main' && !G.robberStep) {
         if (target.kind === 'edge' && G.devStep === 'roadBuilding') {
-          move(current, (m) => m.placeFreeRoad(target.id))
+          move(actor, (m) => m.placeFreeRoad(target.id))
           return
         }
-        if (target.kind === 'vertex' && kind === 'settlement') move(current, (m) => m.placeSettlement(target.id))
-        if (target.kind === 'vertex' && kind === 'city') move(current, (m) => m.upgradeCity(target.id))
-        if (target.kind === 'edge' && kind === 'road') move(current, (m) => m.placeRoad(target.id))
+        if (!G.rolled) return
+        if (target.kind === 'vertex' && kind === 'settlement') move(actor, (m) => m.placeSettlement(target.id))
+        if (target.kind === 'vertex' && kind === 'city') move(actor, (m) => m.upgradeCity(target.id))
+        if (target.kind === 'edge' && kind === 'road') move(actor, (m) => m.placeRoad(target.id))
       }
     },
-    [G, ctx, phase, current, setupVertex, kind, move],
+    [G, ctx, phase, actor, myTurn, setupVertex, kind, move],
   )
 
   const onHover = useCallback((info: HoverInfo | null) => setHover(info), [])
 
   const doRoll = () => {
-    if (!G || phase !== 'main' || G.rolled || G.robberStep || rolling) return
+    if (!G || phase !== 'main' || G.rolled || G.robberStep || G.devStep || G.pendingTrade || rolling || !myTurn) return
     setRolling(true)
-    move(current, (m) => m.roll())
+    move(actor, (m) => m.roll())
   }
 
   // build mode shown to GameCanvas — ghosts are pre-filtered to legal spots
   const mode = useMemo<BuildMode>(() => {
+    if (!myTurn) return { kind: null, player: actor }
     if (phase === 'setup' && G) {
       return setupVertex
-        ? { kind: 'road', player: current, allowedEdges: new Set(validSetupEdges(G, setupVertex)) }
-        : { kind: 'settlement', player: current, allowedVertices: new Set(validSetupVertices(G)) }
+        ? { kind: 'road', player: actor, allowedEdges: new Set(validSetupEdges(G, setupVertex)) }
+        : { kind: 'settlement', player: actor, allowedVertices: new Set(validSetupVertices(G)) }
     }
-    if (!G || phase !== 'main' || !G.rolled || G.robberStep) return { kind: null, player: current }
+    if (!G || phase !== 'main' || G.robberStep) return { kind: null, player: actor }
     // Road Building effect: ghosts for the free roads (no cost check)
     if (G.devStep === 'roadBuilding')
-      return { kind: 'road', player: current, allowedEdges: new Set(connectedRoadEdges(G, current)) }
-    if (kind === 'road') return { kind, player: current, allowedEdges: new Set(validRoadEdges(G, current)) }
+      return { kind: 'road', player: actor, allowedEdges: new Set(connectedRoadEdges(G, actor)) }
+    if (!G.rolled) return { kind: null, player: actor }
+    if (kind === 'road') return { kind, player: actor, allowedEdges: new Set(validRoadEdges(G, actor)) }
     if (kind === 'settlement')
-      return { kind, player: current, allowedVertices: new Set(validSettlementVertices(G, current)) }
-    if (kind === 'city') return { kind, player: current, allowedVertices: new Set(validCityVertices(G, current)) }
-    return { kind: null, player: current }
-  }, [phase, setupVertex, current, kind, G])
+      return { kind, player: actor, allowedVertices: new Set(validSettlementVertices(G, actor)) }
+    if (kind === 'city') return { kind, player: actor, allowedVertices: new Set(validCityVertices(G, actor)) }
+    return { kind: null, player: actor }
+  }, [phase, setupVertex, actor, myTurn, kind, G])
 
+  if (matchParam && mpSession === 'pending') return <div className="game-shell" />
+  if (matchParam && !clientConfig)
+    return (
+      <div className="game-shell game-connecting">
+        <div className="overlay">
+          <div className="overlay-card">
+            <h3>Session lost</h3>
+            <p className="muted small">
+              no seat credentials for this match in this browser — rejoin from the room page.
+            </p>
+            <div className="overlay-actions">
+              <Link className="btn" to="/online" search={{}}>
+                ⟵ Lobby
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   if (!G || !ctx) return <div className="game-shell" />
 
   const robberMode = G.robberStep === 'move'
-  const canBuild = phase === 'main' && G.rolled && !G.robberStep
+  const canBuild = phase === 'main' && G.rolled && !rolling && !G.robberStep && !G.devStep && !G.pendingTrade && !gameover && myTurn
   const canTrade = canBuild && !G.pendingTrade
-  const roadSpots = canBuild ? validRoadEdges(G, current) : []
-  const settlementSpots = canBuild ? validSettlementVertices(G, current) : []
-  const citySpots = canBuild ? validCityVertices(G, current) : []
-  const supply = pieceCounts(G, current)
-  const giveRate = bankGive ? bankTradeRate(G, current, bankGive) : null
+  const roadSpots = canBuild ? validRoadEdges(G, actor) : []
+  const settlementSpots = canBuild ? validSettlementVertices(G, actor) : []
+  const citySpots = canBuild ? validCityVertices(G, actor) : []
+  const supply = pieceCounts(G, actor)
+  const giveRate = bankGive ? bankTradeRate(G, actor, bankGive) : null
   const discardPid = G.robberStep === 'discard' ? Number(Object.keys(G.pendingDiscards)[0]) : null
   const diceResult: DiceRoll | null = G.lastRoll
   const vps = vpCounts(G)
 
   const turnBanner = gameover
-    ? `${PLAYER_NAMES[gameover.winner]} wins!`
-    : phase === 'setup'
-      ? `${PLAYER_NAMES[current]} — place settlement${setupVertex ? ' ✓' : ''} + road${setupVertex ? '' : ' (settlement first)'}`
+    ? `${pname(G, gameover.winner)} wins${seat === gameover.winner ? ' — that’s you! 🎉' : '!'}`
+    : phase === 'openingRoll'
+      ? `${pname(G, current)} — roll for turn order`
+      : phase === 'setup'
+      ? `${pname(G, current)} · ${setupVertex ? 'Choose a connecting road' : 'Choose a settlement corner'}`
       : G.robberStep === 'discard'
         ? 'Robber! Players discard half their hand'
         : G.robberStep === 'move'
-          ? `${PLAYER_NAMES[current]} — move the robber`
+          ? `${pname(G, current)} — move the robber`
           : G.robberStep === 'steal'
-            ? `${PLAYER_NAMES[current]} — choose a victim to rob`
+            ? `${pname(G, current)} — choose a victim to rob`
             : G.pendingTrade
-              ? `${PLAYER_NAMES[G.pendingTrade.partner]} — respond to ${PLAYER_NAMES[G.pendingTrade.proposer]}'s trade offer`
+              ? `${pname(G, G.pendingTrade.partner)} — respond to ${pname(G, G.pendingTrade.proposer)}'s trade offer`
               : G.devStep === 'roadBuilding'
-                ? `${PLAYER_NAMES[current]} — place free roads (${G.roadBuildingLeft} left, or end turn)`
+                ? `${pname(G, current)} — place free roads (${G.roadBuildingLeft} left)`
                 : G.devStep === 'yearOfPlenty'
-                  ? `${PLAYER_NAMES[current]} — choose 2 resources`
+                  ? `${pname(G, current)} — choose 2 resources`
                   : !G.rolled
-                    ? `${PLAYER_NAMES[current]} — roll the dice`
-                    : `${PLAYER_NAMES[current]} — trade & build`
+                    ? `${pname(G, current)} — roll the dice`
+                    : `${pname(G, current)} — trade & build`
 
   const terrainCounts = TERRAIN_LEGEND
+  const harborKinds = [...new Set(board.ports.map((p) => p.kind))].sort((a, b) =>
+    a === 'generic' ? 1 : b === 'generic' ? -1 : RESOURCES.indexOf(a) - RESOURCES.indexOf(b),
+  )
 
   return (
+    <GameAudioProvider
+          roll={G.lastRoll?.nonce ?? null}
+          buildings={Object.keys(G.buildings.edges).length + Object.values(G.buildings.vertices).length}
+          cities={Object.values(G.buildings.vertices).filter((b) => b.type === 'city').length}
+          robber={G.robberTileId}
+          journal={G.log[0] ?? ''}
+          winner={gameover?.winner ?? null}
+          playedCard={G.lastPlayedCard ? `${G.lastPlayedCard.card}:${G.lastPlayedCard.sequence}` : undefined}
+          seed={G.seed}
+        >
     <div className="game-shell">
       <GameCanvas
         board={board}
@@ -522,12 +709,29 @@ function GamePage() {
 
       <header className="hud hud-top">
         <Link to="/" className="hud-brand">
-          ⟵ <span>Catan 3D</span>
+          <img src="/assets/astra/ui/crest.svg" alt="" /> <span>CATAN</span>
         </Link>
-        <span className="hud-seed">island #{seed.toString(36)}</span>
-        <button className="btn btn-small" onClick={newGame}>
-          ↻ New game
-        </button>
+        {seat !== null ? (
+          <span className="hud-seat">
+            <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[seat]) } as React.CSSProperties} />
+            you are {pname(G, seat)}
+            {mpSession && mpSession !== 'pending' && mpSession.roomCode ? ` · room ${mpSession.roomCode}` : ''}
+          </span>
+        ) : (
+          <span className="hud-seed">island #{G.seed.toString(36)}</span>
+        )}
+        {seat === null && <button className="btn btn-small table-hands-toggle" onClick={() => setShowTableHands(true)}>Table hands</button>}
+        <SoundToggle />
+        {!matchParam && (
+          <button className="btn btn-small" onClick={newGame}>
+            ↻ New game
+          </button>
+        )}
+        {matchParam && (
+          <Link className="btn btn-small" to="/online" search={{}}>
+            ⟵ Lobby
+          </Link>
+        )}
       </header>
 
       <div className={`turn-banner ${gameover ? 'turn-banner-win' : ''}`}>
@@ -535,17 +739,88 @@ function GamePage() {
         {turnBanner}
       </div>
 
-      <aside className="hud hud-panel">
+      {showTableHands && seat === null && <dialog className="table-hands-dialog" aria-label="Local table hands" ref={node => { if (node && !node.open) node.showModal() }} onCancel={() => setShowTableHands(false)}><section className="overlay-card"><h2>Hands around the table</h2><p className="muted small">Local play · everyone’s cards are visible.</p>{G.hands.map((hand,i) => <div className="table-hand-summary" key={i}><strong>{pname(G,i)} · {handSize(i)} cards</strong><div>{RESOURCES.map(r=><span key={r}><ResourceIcon resource={r}/>{hand[r]}</span>)}</div></div>)}<button className="btn btn-primary" onClick={() => setShowTableHands(false)}>Back to the island</button></section></dialog>}
+      <aside className="hud player-rail" aria-label="Player information">        <div className="rail-title"><span className="eyebrow">AROUND THE TABLE</span><small>10 points to win</small></div>
+        <div className="hands">
+          {G.hands.map((hand, i) => (
+            <div key={i} className={`hand-row ${i === current ? 'hand-row-active' : ''}`}>
+              <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
+              <span className="hand-name">
+                {pname(G, i)}
+                {seat === i ? ' (you)' : ''}{i === current && <small className="player-turn-label">Playing</small>}
+              </span>
+              {hiddenHand(i) ? (
+                <span className="hand-res muted">🂠 {handSize(i)} cards</span>
+              ) : (
+                <span className="hand-res">
+                  {RESOURCES.map((r) => (
+                    <span key={r} className={hand[r] > 0 ? '' : 'muted'}>
+                      {<ResourceIcon resource={r} />}
+                      {hand[r]}
+                    </span>
+                  ))}
+                </span>
+              )}
+              <span className="hand-vp" title="victory points">
+                {vps[i]} VP
+              </span><span className="player-card-count">{handSize(i)} cards · {G.devHandSizes?.[i] ?? G.devHands[i].length} dev</span>
+            </div>
+          ))}
+        </div>
+{G.lastPlayedCard && <button className="last-card-note" onClick={() => setDismissedCard(0)}><span>LAST CARD PLAYED</span><strong>{DEV_CARD_INFO[G.lastPlayedCard.card].label}</strong><small>{pname(G,G.lastPlayedCard.player)}</small></button>}<Soundboard /></aside>
+      <HandTray name={pname(G, actor)} hand={G.hands[actor]} cards={G.devHands[actor]} turn={ctx.turn}
+        canPlay={phase === 'main' && myTurn && !gameover && !G.devStep && !G.robberStep && !G.pendingTrade && G.devPlayedAtTurn !== ctx.turn}
+        onOpenCards={() => { setActionTab('cards'); setKind(null); requestAnimationFrame(() => document.getElementById('development-actions')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })) }}
+      />
+      {G.lastPlayedCard && dismissedCard !== G.lastPlayedCard.sequence && <section className="hud played-card-announcement" aria-live="polite"><span className="eyebrow">PLAYED FOR ALL TO SEE</span><button className="card-dismiss" aria-label="Dismiss played card" onClick={() => setDismissedCard(G.lastPlayedCard!.sequence)}>×</button><div className="played-card-symbol"><GameIcon name={G.lastPlayedCard.card} /></div><h2>{DEV_CARD_INFO[G.lastPlayedCard.card].label}</h2><p>{pname(G,G.lastPlayedCard.player)} played this card</p><small>{DEV_CARD_INFO[G.lastPlayedCard.card].hint}</small></section>}
+      <aside className="hud hud-panel" aria-label="Turn controls"><div className="action-panel-body">
+        <div className="table-heading"><span className="eyebrow">THE ISLAND</span><span>First to 10 points</span></div>
+        <section className="captain-card"><div><span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[current]) } as React.CSSProperties} /><h2>{pname(G, current)}’s turn</h2><span className="captain-score">{vps[current]} <small>/ 10</small></span></div><p>{phase === 'setup' ? (setupVertex ? 'Connect your settlement with a road.' : 'Choose a glowing corner to settle.') : phase === 'openingRoll' ? 'Roll to decide who starts the adventure.' : G.devStep || G.robberStep || G.pendingTrade ? turnBanner : !myTurn ? `Waiting for ${pname(G,current)} to finish.` : !G.rolled ? 'Roll the dice to gather resources.' : 'Trade, build, then pass the dice.'}</p></section>
+        {phase === 'setup' && <section className="setup-guide"><p className="eyebrow">YOUR FIRST FOOTHOLD</p><div className="setup-steps"><span className={!setupVertex ? 'current-step' : 'complete-step'}><b>{setupVertex ? '✓' : '1'}</b> Settle</span><i /><span className={setupVertex ? 'current-step' : ''}><b>2</b> Connect</span></div><p>{setupVertex ? 'Select a glowing road beside your new settlement.' : 'Corners touching different terrains give you more ways to gather resources.'}</p>{setupVertex && <button className="btn btn-small" onClick={() => setSetupVertex(null)}>↶ Choose another corner</button>}<small>Your second settlement collects starting resources.</small></section>}
+        {phase === 'openingRoll' && (
+          <>
+            <h3>Opening roll</h3>
+            <p className="muted small">everyone throws the dice — the highest total places first</p>
+            <button
+              className="btn btn-primary dice-roll-btn"
+              disabled={!myTurn || G.openingRolls[current] !== null || rolling || !!gameover}
+              onClick={() => {
+                setRolling(true)
+                move(actor, (m) => m.openingRoll())
+              }}
+            >
+              {rolling ? 'Rolling…' : !myTurn ? `waiting for ${pname(G, current)}…` : '🎲 Roll for order'}
+            </button>
+            {diceResult && !rolling && (
+              <div className="dice-result">
+                <DieFace v={diceResult.die1} />
+                <DieFace v={diceResult.die2} />
+                <span className="dice-sum">{diceResult.sum}</span>
+              </div>
+            )}
+            <ul className="legend opening-rolls">
+              {G.openingRolls.map((r, i) => (
+                <li key={i} className={r !== null && r === Math.max(...(G.openingRolls.filter((x): x is number => x !== null))) ? 'opening-best' : ''}>
+                  <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
+                  {pname(G, i)}
+                  <span className="count">{r ?? '—'}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+
         {phase === 'main' && (
           <>
             <h3>Dice</h3>
-            <button
+            {(!G.rolled || rolling || G.devStep || G.robberStep) && <button
               className="btn btn-primary dice-roll-btn"
               onClick={doRoll}
-              disabled={G.rolled || !!G.robberStep || rolling || !!gameover}
+              disabled={G.rolled || !!G.robberStep || !!G.devStep || !!G.pendingTrade || rolling || !!gameover || !myTurn}
             >
-              {rolling ? 'Rolling…' : G.robberStep === 'move' ? 'Move the robber first' : '🎲 Roll dice'}
-            </button>
+              {rolling ? 'Rolling…' : G.devStep ? 'Finish your development card' : G.robberStep === 'move' ? 'Move the robber first' : '🎲 Roll dice'}
+            </button>}
+            {G.devStep === 'roadBuilding' && myTurn && <button className="btn end-turn-btn" onClick={() => move(actor, m => m.finishRoadBuilding())}>Finish Road Building</button>}
             {diceResult && !rolling && (
               <div className="dice-result">
                 <DieFace v={diceResult.die1} />
@@ -557,9 +832,9 @@ function GamePage() {
               <div className="steal-picker">
                 <p className="small">Steal 1 random card from:</p>
                 {G.stealTargets!.map((v) => (
-                  <button key={v} className="chip" style={{ '--chip': hex(PLAYER_COLORS[v]) } as React.CSSProperties} onClick={() => move(current, (m) => m.steal(v))}>
+                  <button key={v} className="chip" style={{ '--chip': hex(PLAYER_COLORS[v]) } as React.CSSProperties} onClick={() => move(actor, (m) => m.steal(v))}>
                     <span className="chip-dot" />
-                    {PLAYER_NAMES[v]} ({totalCards(G.hands[v])} cards)
+                    {pname(G, v)} ({handSize(v)} cards)
                   </button>
                 ))}
               </div>
@@ -576,37 +851,8 @@ function GamePage() {
           </>
         )}
 
-        <h3>Hands</h3>
-        <div className="hands">
-          {G.hands.map((hand, i) => (
-            <div key={i} className={`hand-row ${i === current && phase !== 'setup' ? 'hand-row-active' : ''}`}>
-              <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[i]) } as React.CSSProperties} />
-              <span className="hand-name">{PLAYER_NAMES[i]}</span>
-              <span className="hand-res">
-                {RESOURCES.map((r) => (
-                  <span key={r} className={hand[r] > 0 ? '' : 'muted'}>
-                    {RESOURCE_ICONS[r]}
-                    {hand[r]}
-                  </span>
-                ))}
-              </span>
-              <span className="hand-vp" title="victory points">
-                {vps[i]} VP
-              </span>
-            </div>
-          ))}
-        </div>
-        <p className="muted small bank-line">
-          Bank:{' '}
-          {RESOURCES.map((r) => (
-            <span key={r}>
-              {RESOURCE_ICONS[r]}
-              {G.bank[r]}
-            </span>
-          ))}
-        </p>
-
-        {phase === 'main' && (
+        {phase === 'main' && <nav className="action-tabs" aria-label="Turn actions">{(['build','trade','cards'] as const).map(tab => <button key={tab} className={actionTab === tab ? 'selected' : ''} aria-pressed={actionTab === tab} onClick={() => {setActionTab(tab);setKind(null)}}>{tab === 'cards' ? 'Develop' : tab === 'build' ? 'Build' : 'Trade'}</button>)}</nav>}
+        {phase === 'main' && actionTab === 'trade' && (
           <>
             <h3>Trade</h3>
             <div className="trade-row">
@@ -617,14 +863,14 @@ function GamePage() {
                   <button
                     key={r}
                     className={`trade-chip ${bankGive === r ? 'trade-chip-active' : ''}`}
-                    disabled={!canTrade || G.hands[current][r] < rate}
+                    disabled={!canTrade || G.hands[actor][r] < rate}
                     title={`${rate} ${RESOURCE_LABELS[r]} → 1 of another resource${rate === 2 ? ' (2:1 port)' : rate === 3 ? ' (3:1 port)' : ''}`}
                     onClick={() => {
                       setBankGive(bankGive === r ? null : r)
                       if (bankTake === r) setBankTake(null)
                     }}
                   >
-                    {RESOURCE_ICONS[r]}
+                    {<ResourceIcon resource={r} />}
                     <span className="trade-rate">{rate}:1</span>
                   </button>
                 )
@@ -639,7 +885,7 @@ function GamePage() {
                   disabled={!canTrade || G.bank[r] < 1 || r === bankGive}
                   onClick={() => setBankTake(bankTake === r ? null : r)}
                 >
-                  {RESOURCE_ICONS[r]}
+                  {<ResourceIcon resource={r} />}
                 </button>
               ))}
             </div>
@@ -648,7 +894,7 @@ function GamePage() {
               disabled={!canTrade || !bankGive || !bankTake}
               onClick={() => {
                 if (!bankGive || !bankTake) return
-                move(current, (m) => m.tradeBank(bankGive, bankTake))
+                move(actor, (m) => m.tradeBank(bankGive, bankTake))
                 setBankTake(null)
               }}
             >
@@ -660,7 +906,7 @@ function GamePage() {
           </>
         )}
 
-        {phase === 'main' && (
+        {phase === 'main' && actionTab === 'build' && (
           <>
             <h3>Build</h3>
             <div className="build-row">
@@ -669,70 +915,69 @@ function GamePage() {
                 disabled={!canBuild || roadSpots.length === 0}
                 onClick={() => setKind(kind === 'road' ? null : 'road')}
               >
-                <span>🛣 Road</span>
-                <CostTag cost={BUILD_COSTS.road} hand={G.hands[current]} />
+                <span><GameIcon name="road" /> Road</span>
+                <CostTag cost={BUILD_COSTS.road} hand={G.hands[actor]} />
               </button>
               <button
                 className={`btn ${kind === 'settlement' ? 'btn-active' : ''}`}
                 disabled={!canBuild || settlementSpots.length === 0}
                 onClick={() => setKind(kind === 'settlement' ? null : 'settlement')}
               >
-                <span>🏠 Settlement</span>
-                <CostTag cost={BUILD_COSTS.settlement} hand={G.hands[current]} />
+                <span><GameIcon name="settlement" /> Settlement</span>
+                <CostTag cost={BUILD_COSTS.settlement} hand={G.hands[actor]} />
               </button>
               <button
                 className={`btn ${kind === 'city' ? 'btn-active' : ''}`}
                 disabled={!canBuild || citySpots.length === 0}
                 onClick={() => setKind(kind === 'city' ? null : 'city')}
               >
-                <span>🏙 City</span>
-                <CostTag cost={BUILD_COSTS.city} hand={G.hands[current]} />
+                <span><GameIcon name="city" /> City</span>
+                <CostTag cost={BUILD_COSTS.city} hand={G.hands[actor]} />
               </button>
               <button
                 className="btn"
-                disabled={!canBuild || !!G.devStep || G.devDeck.length === 0}
+                disabled={!canBuild || !!G.devStep || G.devDeck.length === 0 || RESOURCES.some(r => G.hands[actor][r] < (DEV_COST[r] ?? 0))}
                 title={G.devDeck.length === 0 ? 'the deck is empty' : 'draw from the development deck'}
-                onClick={() => move(current, (m) => m.buyDevCard())}
+                onClick={() => move(actor, (m) => m.buyDevCard())}
               >
-                <span>🃏 Dev card</span>
-                <CostTag cost={DEV_COST} hand={G.hands[current]} />
+                <span><GameIcon name="cards" /> Development</span>
+                <CostTag cost={DEV_COST} hand={G.hands[actor]} />
               </button>
             </div>
             <p className="muted small supply-line">
               supply: 🛣 {SUPPLY_LIMITS.road - supply.road} · 🏠 {SUPPLY_LIMITS.settlement - supply.settlement} · 🏙{' '}
               {SUPPLY_LIMITS.city - supply.city} left
             </p>
-            <button className="btn end-turn-btn" disabled={!canBuild} onClick={() => move(current, (m) => m.endTurn())}>
-              End turn ⟶
-            </button>
+
+            {G.lastBuild && G.lastBuild.player === actor && G.lastBuild.turn === ctx.turn && <button className="btn end-turn-btn" disabled={!canBuild} onClick={() => move(actor, m => m.undoBuild())}>↶ Undo last {G.lastBuild.kind}</button>}
             <p className="muted small">
               {canBuild
                 ? 'Glowing spots are legal — costs are paid to the bank.'
-                : 'Roll the dice first; build afterwards.'}
+                : !myTurn ? `Available on your turn.` : G.robberStep || G.devStep || G.pendingTrade ? 'Finish the current action to build.' : 'Roll the dice to unlock building.'}
             </p>
           </>
         )}
 
-        {phase === 'main' && (
+        {phase === 'main' && actionTab === 'cards' && (
           <>
-            <h3>Development</h3>
+            <h3 id="development-actions" tabIndex={-1}>Development cards</h3>
             <p className="muted small">
               deck {G.devDeck.length}/25 · 🏅{' '}
               {G.longestRoad
-                ? `${PLAYER_NAMES[G.longestRoad.player]} ${G.longestRoad.size}`
+                ? `${pname(G, G.longestRoad.player)} ${G.longestRoad.size}`
                 : '—'}{' '}
               · ⚔{' '}
-              {G.largestArmy ? `${PLAYER_NAMES[G.largestArmy.player]} ${G.largestArmy.size}` : '—'}
+              {G.largestArmy ? `${pname(G, G.largestArmy.player)} ${G.largestArmy.size}` : '—'}
             </p>
-            {G.devHands[current].length === 0 ? (
+            {G.devHands[actor].length === 0 ? (
               <p className="muted small">no cards in hand</p>
             ) : (
               <div className="dev-hand">
-                {G.devHands[current].map((entry, i) => {
+                {G.devHands[actor].map((entry, i) => {
                   const info = DEV_CARD_INFO[entry.card]
                   const fresh = entry.boughtTurn === ctx.turn
                   const playable =
-                    canBuild &&
+                    myTurn &&
                     !G.devStep &&
                     !G.robberStep &&
                     !G.pendingTrade &&
@@ -742,7 +987,7 @@ function GamePage() {
                   return (
                     <div key={i} className="dev-card-row" title={info.hint}>
                       <span className="dev-card-name">
-                        {info.icon} {info.label}
+                        <GameIcon name={entry.card} /> {info.label}
                         {fresh && <span className="muted small"> ·new</span>}
                       </span>
                       {entry.card === 'victoryPoint' ? (
@@ -755,7 +1000,7 @@ function GamePage() {
                         <button
                           className="btn btn-small"
                           disabled={!playable}
-                          onClick={() => move(current, (m) => m.playDevCard(i))}
+                          onClick={() => move(actor, (m) => m.playDevCard(i))}
                         >
                           Play
                         </button>
@@ -766,21 +1011,33 @@ function GamePage() {
               </div>
             )}
             <p className="muted small dev-knights">
-              knights: {G.playedKnights.map((n, p) => `${PLAYER_NAMES[p]} ${n}`).join(' · ')}
+              knights: {G.playedKnights.map((n, p) => `${pname(G, p)} ${n}`).join(' · ')}
             </p>
           </>
         )}
 
-        <h3>Log</h3>
-        <ul className="log">
-          {G.log.slice(0, 7).map((line, i) => (
+
+        <details className="hud-details"><summary>Bank supply</summary>        <p className="muted small bank-line">
+          Bank:{' '}
+          {RESOURCES.map((r) => (
+            <span key={r}>
+              {<ResourceIcon resource={r} />}
+              {G.bank[r]}
+            </span>
+          ))}
+        </p>
+
+</details>
+        <details className="hud-details"><summary>Voyage journal</summary>
+        <ul className="log log-full">
+          {G.log.map((line, i) => (
             <li key={i} className={i === 0 ? 'log-latest' : ''}>
               {line}
             </li>
           ))}
         </ul>
 
-        <h3>Island</h3>
+        </details><details className="hud-details"><summary>Island &amp; harbor guide</summary><h3>Island</h3>
         <ul className="legend">
           {terrainCounts.map(({ terrain, count }) => (
             <li key={terrain}>
@@ -791,72 +1048,88 @@ function GamePage() {
           ))}
         </ul>
 
-        {hover && (
-          <>
-            <h3>Hovering</h3>
-            <p className="small">
-              <strong>{hover.terrainLabel}</strong>
-              <br />
-              {hover.resourceLabel ? <>produces {RESOURCE_LABELS[hover.resourceLabel]}</> : 'produces nothing'}
-              {hover.number !== null && (
-                <>
-                  <br />
-                  number token: <strong className={hover.number === 6 || hover.number === 8 ? 'red' : ''}>{hover.number}</strong>
-                </>
-              )}
-            </p>
-          </>
-        )}
+        <h3>Harbors</h3>
+        <ul className="legend">
+          {harborKinds.map((kind) => (
+            <li key={kind}>
+              <span
+                className="swatch"
+                style={{ background: kind === 'generic' ? '#6e7f8f' : hex(RESOURCE_ACCENT[kind]) }}
+              />
+              {kind === 'generic'
+                ? '3:1 · any resource'
+                : `2:1 · ${RESOURCE_LABELS[kind]} ${RESOURCE_ICONS[kind]}`}
+            </li>
+          ))}
+        </ul>
+
+        </details>
+        </div>
+        {phase === 'main' && <div className="turn-footer"><button className="btn btn-primary turn-finish" disabled={!canBuild} onClick={() => move(actor, (m) => m.endTurn())}>End turn <span aria-hidden="true">→</span></button></div>}
       </aside>
 
+      {hover && <div className="board-inspect" aria-live="polite">{hover.resourceLabel && <ResourceIcon resource={hover.resourceLabel} />}<div><strong>{hover.terrainLabel}{hover.number !== null ? ' · ' + hover.number : ''}</strong><small>{hover.portKind ? 'A settlement at either dock corner unlocks this trade.' : hover.resourceLabel ? 'Produces ' + RESOURCE_LABELS[hover.resourceLabel].toLowerCase() + ' when this number is rolled.' : 'The desert produces no resources.'}</small></div></div>}
       <footer className="hud hud-bottom">
-        {phase === 'setup' ? 'click a glowing corner → then a touching road slot' : 'drag · rotate | scroll · zoom | right-drag · pan'}
+        {phase === 'openingRoll'
+          ? 'everyone rolls — highest total picks the first spot'
+          : phase === 'setup'
+            ? 'click a glowing corner → then a touching road slot'
+            : 'drag · rotate | scroll · zoom | right-drag · pan'}
       </footer>
 
-      {discardPid !== null && (
-        <DiscardPanel
-          key={discardPid}
-          player={discardPid}
-          hand={G.hands[discardPid]}
-          required={G.pendingDiscards[discardPid]}
-          onConfirm={(cards) => move(discardPid, (m) => m.discardHalf(cards))}
-        />
-      )}
+      {discardPid !== null &&
+        !hiddenHand(discardPid) && (
+          <DiscardPanel
+            key={discardPid}
+            player={discardPid}
+            playerName={pname(G, discardPid)}
+            hand={G.hands[discardPid]}
+            required={G.pendingDiscards[discardPid]}
+            onConfirm={(cards) => move(discardPid, (m) => m.discardHalf(cards))}
+          />
+        )}
 
-      {G.pendingTrade && !showTradeOffer && (() => {
+      {G.pendingTrade && !showTradeOffer && counterSeat === null && (() => {
         const pt = G.pendingTrade!
+        const responders = pt.partners ?? [pt.partner]
+        const eligible = responders.filter(p => seat === null || seat === p)
         return (
-          <div className="overlay">
-            <div className="overlay-card">
-              <h3>Trade offer</h3>
-              <p className="trade-parties">
-                <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[pt.proposer]) } as React.CSSProperties} />{' '}
-                {PLAYER_NAMES[pt.proposer]} offers{' '}
-                <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[pt.partner]) } as React.CSSProperties} />{' '}
-                {PLAYER_NAMES[pt.partner]}
-              </p>
-              <p className="trade-terms">
-                {countsLabel(pt.give)} <span className="trade-swap">⇄</span> {countsLabel(pt.take)}
-              </p>
+          <div className="overlay"><div className="overlay-card">
+            <h3>{responders.length > 1 ? 'An offer for the table' : 'Trade offer'}</h3>
+            <p>{pname(G, pt.proposer)} offers {responders.map(p => pname(G, p)).join(', ')}</p>
+            <p className="trade-terms">{countsLabel(pt.give)} <span className="trade-swap">⇄</span> {countsLabel(pt.take)}</p>
+            {responders.length > 1 && <p className="muted small">The first acceptance completes the trade. A counter replaces this offer.</p>}
+            {eligible.map(p => <section key={p}>
+              <p className="small">{pname(G, p)} receives {countsLabel(pt.give)} and gives {countsLabel(pt.take)}</p>
               <div className="overlay-actions">
-                <button className="btn" onClick={() => move(pt.partner, (m) => m.declineTrade())}>
-                  Decline
-                </button>
-                <button className="btn btn-primary" onClick={() => move(pt.partner, (m) => m.acceptTrade())}>
-                  Accept
-                </button>
+                <button className="btn" onClick={() => move(p, m => m.declineTrade())}>Decline</button>
+                <button className="btn" onClick={() => setCounterSeat(p)}>Counter</button>
+                <button className="btn btn-primary" onClick={() => move(p, m => m.acceptTrade())}>Accept</button>
               </div>
-            </div>
-          </div>
+            </section>)}
+            {!eligible.length && <p className="muted small">Waiting for a response…</p>}
+          </div></div>
         )
       })()}
+      {counterSeat !== null && G.pendingTrade && <TradeOfferPanel
+        key={counterSeat}
+        proposer={counterSeat}
+        target={G.pendingTrade.proposer}
+        initialGive={G.pendingTrade.take}
+        initialTake={G.pendingTrade.give}
+        names={G.hands.map((_, i) => pname(G, i))}
+        hands={G.hands.map((h, i) => hiddenHand(i) ? null : h)}
+        onPropose={(_partner, give, take) => { move(counterSeat, m => m.counterTrade(give, take)); setCounterSeat(null) }}
+        onClose={() => setCounterSeat(null)}
+      />}
 
       {showTradeOffer && canTrade && (
         <TradeOfferPanel
-          proposer={current}
-          hands={G.hands}
+          proposer={actor}
+          names={G.hands.map((_, i) => pname(G, i))}
+          hands={G.hands.map((h, i) => (hiddenHand(i) ? null : h))}
           onPropose={(partner, give, take) => {
-            move(current, (m) => m.proposeTrade(partner, give, take))
+            move(actor, (m) => m.proposeTrade(partner, give, take))
             setShowTradeOffer(false)
           }}
           onClose={() => setShowTradeOffer(false)}
@@ -874,11 +1147,11 @@ function GamePage() {
                   key={r}
                   className="trade-chip"
                   onClick={() => {
-                    move(current, (m) => m.playDevCard(monoPick, r))
+                    move(actor, (m) => m.playDevCard(monoPick, r))
                     setMonoPick(null)
                   }}
                 >
-                  {RESOURCE_ICONS[r]} {RESOURCE_LABELS[r]}
+                  {<ResourceIcon resource={r} />} {RESOURCE_LABELS[r]}
                 </button>
               ))}
             </div>
@@ -894,7 +1167,7 @@ function GamePage() {
       {G.devStep === 'yearOfPlenty' && !G.robberStep && (
         <YearOfPlentyPanel
           bank={G.bank}
-          onTake={(r1, r2) => move(current, (m) => m.takeYearOfPlenty(r1, r2))}
+          onTake={(r1, r2) => move(actor, (m) => m.takeYearOfPlenty(r1, r2))}
         />
       )}
 
@@ -903,14 +1176,28 @@ function GamePage() {
           <div className="overlay-card overlay-win">
             <h2>
               <span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[gameover.winner]) } as React.CSSProperties} />{' '}
-              {PLAYER_NAMES[gameover.winner]} wins with {vps[gameover.winner]} VP!
+              {pname(G, gameover.winner)} wins with {vps[gameover.winner]} VP!
             </h2>
-            <button className="btn btn-primary" onClick={newGame}>
-              Play again
-            </button>
+            {matchParam ? (
+              <>
+                {mpSession && mpSession !== 'pending' && loadCreatorToken(mpSession.roomCode ?? '') !== null && (
+                  <button className="btn btn-primary" disabled={rematching} onClick={() => void doRematch()}>
+                    {rematching ? 'Setting up…' : '🔁 Rematch — fresh island'}
+                  </button>
+                )}
+                <Link className="btn" to="/online" search={{}}>
+                  Back to the lobby
+                </Link>
+              </>
+            ) : (
+              <button className="btn btn-primary" onClick={newGame}>
+                Play again
+              </button>
+            )}
           </div>
         </div>
       )}
     </div>
+    </GameAudioProvider>
   )
 }

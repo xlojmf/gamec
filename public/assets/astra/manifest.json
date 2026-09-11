@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "direction": "The Island — hand-painted tabletop",
+  "concept": "/assets/astra/concept/island.png",
+  "terrains": {
+    "forest": {
+      "top": "/assets/astra/world/forest-top.png",
+      "side": "/assets/astra/world/forest-side.png"
+    },
+    "pasture": {
+      "top": "/assets/astra/world/pasture-top.png",
+      "side": "/assets/astra/world/pasture-side.png"
+    },
+    "fields": {
+      "top": "/assets/astra/world/fields-top.png",
+      "side": "/assets/astra/world/fields-side.png"
+    },
+    "hills": {
+      "top": "/assets/astra/world/hills-top.png",
+      "side": "/assets/astra/world/hills-side.png"
+    },
+    "mountains": {
+      "top": "/assets/astra/world/mountains-top.png",
+      "side": "/assets/astra/world/mountains-side.png"
+    },
+    "desert": {
+      "top": "/assets/astra/world/desert-top.png",
+      "side": "/assets/astra/world/desert-side.png"
+    }
+  },
+  "water": "/assets/astra/world/water.png",
+  "frame": "/assets/astra/world/frame.png",
+  "tokenPlate": "/assets/astra/world/token-plate.png",
+  "details": {
+    "rock": "/assets/astra/details/slate-v1.png",
+    "needles": "/assets/astra/details/fir-needles-v1.png",
+    "wood": "/assets/astra/details/painted-wood-v1.png"
+  },
+  "ui": {
+    "crest": "/assets/astra/ui/crest.svg",
+    "icons": {
+      "wood": "/assets/astra/ui/wood.svg",
+      "brick": "/assets/astra/ui/brick.svg",
+      "grain": "/assets/astra/ui/grain.svg",
+      "wool": "/assets/astra/ui/wool.svg",
+      "ore": "/assets/astra/ui/ore.svg"
+    },
+    "dice": [
+      "/assets/astra/ui/dice-1.svg",
+      "/assets/astra/ui/dice-2.svg",
+      "/assets/astra/ui/dice-3.svg",
+      "/assets/astra/ui/dice-4.svg",
+      "/assets/astra/ui/dice-5.svg",
+      "/assets/astra/ui/dice-6.svg"
+    ],
+    "fonts": {
+      "display": "Palatino Linotype, Palatino, Georgia, serif",
+      "body": "Trebuchet MS, Segoe UI, sans-serif"
+    }
+  }
+}

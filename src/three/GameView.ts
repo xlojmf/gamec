@@ -1,5 +1,5 @@
 /**
- * GameView — the ONLY place in the app that knows Three.js exists.
+ * GameView — the React-facing facade for the isolated Three.js renderer.
  *
  * React (via GameCanvas) feeds it plain state and receives events back:
  *   buildBoard(board)                 → rebuild the island
@@ -7,15 +7,16 @@
  *   setBuildMode({kind, player})      → show buildable ghost spots + picking
  *   onPick / onHover                  → callbacks to the UI layer
  *
- * Placeholder art is fully procedural; the GPT Astra art track (A2) will swap
- * materials/textures via a manifest without touching this architecture.
+ * Renderer modules under src/three own shared geometry; GameView bridges them to the board.
  */
 
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import type { Board, EdgeId, VertexId } from '../game/board'
-import { TERRAIN_INFO, type Resource } from '../game/terrain'
+import type { Board, EdgeId, PortKind, VertexId } from '../game/board'
+import { RESOURCE_LABELS, TERRAIN_INFO, type Resource } from '../game/terrain'
 import { mulberry32 } from '../game/rng'
+import { createCity, createSettlement, setPieceWoodTexture } from './pieces'
+import { createForestScenery, createMountainScenery, createWheatScenery, setSceneryTextures } from './scenery'
 
 export const PLAYER_COLORS = [0xd7443e, 0x3d7dd8, 0xe8963c, 0xefe6d5] as const
 export const PLAYER_NAMES = ['Red', 'Blue', 'Orange', 'White'] as const
@@ -46,6 +47,8 @@ export interface HoverInfo {
   terrainLabel: string
   resourceLabel: Resource | null
   number: number | null
+  /** Set when hovering a harbor dock: 'generic' (3:1) or the 2:1 resource. */
+  portKind?: 'generic' | Resource
 }
 
 export interface PickTarget {
@@ -55,7 +58,7 @@ export interface PickTarget {
 
 const TILE_HEIGHT = 0.3
 const TILE_TOP = TILE_HEIGHT
-const SKY = 0xc9e4ef
+const SKY = 0x173c42
 const hexColor = (n: number) => '#' + n.toString(16).padStart(6, '0')
 
 // ---------------------------------------------------------------------------
@@ -63,6 +66,9 @@ const hexColor = (n: number) => '#' + n.toString(16).padStart(6, '0')
 // ---------------------------------------------------------------------------
 
 const tileGeometry = new THREE.CylinderGeometry(0.97, 0.97, TILE_HEIGHT, 6)
+const tileBorderGeometry = new THREE.CylinderGeometry(1, 1, 0.055, 6)
+const borderMaterial = new THREE.MeshStandardMaterial({ color: 0xc8bd94, roughness: 0.88 })
+const brassMaterial = new THREE.MeshStandardMaterial({ color: 0xb79b57, roughness: 0.42, metalness: 0.65 })
 
 const terrainMaterials = new Map<string, THREE.MeshStandardMaterial>(
   Object.entries(TERRAIN_INFO).map(([terrain, info]) => [
@@ -71,55 +77,87 @@ const terrainMaterials = new Map<string, THREE.MeshStandardMaterial>(
   ]),
 )
 
+const terrainSides = new Map(Object.entries(TERRAIN_INFO).map(([terrain, info]) => [terrain,
+  new THREE.MeshStandardMaterial({ color: new THREE.Color(info.color).multiplyScalar(0.65), roughness: 0.95 }),
+]))
+const oceanMaterial = new THREE.MeshStandardMaterial({ color: 0x287a80, roughness: 0.7, metalness: 0.06 })
+const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x533926, roughness: 0.65 })
+const tokenMaterial = new THREE.MeshStandardMaterial({ color: 0xf5ecd4, roughness: 0.65 })
+let artLoading: Promise<void> | null = null
+/** Shared materials load once, only in the browser. Failed slots retain their procedural colors. */
+function loadArt() {
+  if (artLoading) return artLoading
+  artLoading = (async () => {
+    const response = await fetch('/assets/astra/manifest.json')
+    if (!response.ok) return
+    const manifest = await response.json() as { terrains: Record<string, {top: string; side: string}>; water: string; frame: string; tokenPlate: string; details?: {rock?: string; needles?: string; wood?: string}; ui?: {dice?: string[]} }
+    const loader = new THREE.TextureLoader()
+    const apply = async (material: THREE.MeshStandardMaterial | undefined, url: string, repeat = 1) => {
+      if (!material || !url) return
+      try {
+        const texture = await loader.loadAsync(url)
+        texture.colorSpace = THREE.SRGBColorSpace
+        texture.anisotropy = 4
+        texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+        texture.repeat.set(repeat, repeat)
+        material.map = texture
+        material.color.set(material === oceanMaterial ? 0x648f84 : 0xffffff)
+        material.needsUpdate = true
+      } catch { /* Art is optional; every slot has a usable procedural fallback. */ }
+    }
+    await Promise.all([
+      ...Object.entries(manifest.terrains ?? {}).flatMap(([terrain, slot]) => [apply(terrainMaterials.get(terrain), slot.top), apply(terrainSides.get(terrain), slot.side)]),
+      apply(oceanMaterial, manifest.water, 1), apply(frameMaterial, manifest.frame), apply(tokenMaterial, manifest.tokenPlate),
+      ...([['rock', manifest.details?.rock, 2], ['needles', manifest.details?.needles, 1], ['wood', manifest.details?.wood, 2]] as const).map(async ([kind, url, repeat]) => {
+        if (!url) return
+        try {
+          const texture = await loader.loadAsync(url)
+          texture.colorSpace = THREE.SRGBColorSpace
+          texture.anisotropy = 4
+          texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+          texture.repeat.set(repeat, repeat)
+          if (kind === 'rock') setSceneryTextures({ rock: texture })
+          else if (kind === 'needles') setSceneryTextures({ needles: texture })
+          else setPieceWoodTexture(texture)
+        } catch { /* Detail slots are optional and retain procedural fallbacks. */ }
+      }),
+    ])
+  })().catch(() => { /* Missing manifest must never stop a match. */ })
+  return artLoading
+}
+
 interface BuildingMaterials {
-  wall: THREE.MeshStandardMaterial
-  roof: THREE.MeshStandardMaterial
   road: THREE.MeshStandardMaterial
 }
 const buildingMaterials = PLAYER_COLORS.map(
   (c) =>
     ({
-      wall: new THREE.MeshStandardMaterial({ color: c, roughness: 0.6 }),
-      roof: new THREE.MeshStandardMaterial({ color: new THREE.Color(c).multiplyScalar(0.62), roughness: 0.55 }),
       road: new THREE.MeshStandardMaterial({ color: new THREE.Color(c).multiplyScalar(0.85), roughness: 0.7 }),
     }) satisfies BuildingMaterials,
 )
 
 // --- prop geometry/material cache ------------------------------------------
 const propGeo = {
-  trunk: new THREE.CylinderGeometry(0.03, 0.045, 0.14, 5),
-  foliage: new THREE.ConeGeometry(0.15, 0.44, 7),
+  leg: new THREE.CylinderGeometry(0.013, 0.018, 0.095, 5),
   sheepBody: new THREE.SphereGeometry(0.1, 10, 8),
   sheepHead: new THREE.SphereGeometry(0.05, 8, 6),
-  wheat: new THREE.ConeGeometry(0.075, 0.2, 6),
-  clay: new THREE.SphereGeometry(0.13, 10, 8),
-  peak: new THREE.ConeGeometry(0.2, 0.55, 6),
-  snow: new THREE.ConeGeometry(0.08, 0.18, 6),
+  clay: new THREE.DodecahedronGeometry(0.14, 0),
   dune: new THREE.SphereGeometry(0.17, 10, 8),
   robberBase: new THREE.CylinderGeometry(0.09, 0.13, 0.42, 10),
   robberHead: new THREE.SphereGeometry(0.1, 10, 8),
 }
 const propMat = {
   trunk: new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 1 }),
-  foliage: new THREE.MeshStandardMaterial({ color: 0x1f5a36, roughness: 0.95 }),
   sheepBody: new THREE.MeshStandardMaterial({ color: 0xf1ede2, roughness: 1 }),
   sheepHead: new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 1 }),
-  wheat: new THREE.MeshStandardMaterial({ color: 0xd9b64a, roughness: 0.9 }),
   clay: new THREE.MeshStandardMaterial({ color: 0xb35431, roughness: 0.95 }),
-  peak: new THREE.MeshStandardMaterial({ color: 0x7f8590, roughness: 0.85 }),
-  snow: new THREE.MeshStandardMaterial({ color: 0xf4f7fa, roughness: 0.6 }),
+  rock: new THREE.MeshStandardMaterial({ color: 0xa0a18e, roughness: 0.98, flatShading: true }),
   dune: new THREE.MeshStandardMaterial({ color: 0xd8c58e, roughness: 1 }),
   robber: new THREE.MeshStandardMaterial({ color: 0x23252d, roughness: 0.5, metalness: 0.25 }),
 }
 
 // --- building geometry cache ------------------------------------------------
 const buildingGeo = {
-  settlementBase: new THREE.BoxGeometry(0.34, 0.2, 0.3),
-  settlementRoof: new THREE.ConeGeometry(0.27, 0.22, 4),
-  cityBase: new THREE.BoxGeometry(0.46, 0.2, 0.3),
-  cityTower: new THREE.BoxGeometry(0.2, 0.34, 0.2),
-  cityRoof: new THREE.ConeGeometry(0.17, 0.16, 4),
-  cityTowerRoof: new THREE.ConeGeometry(0.15, 0.14, 4),
   road: new THREE.BoxGeometry(0.92, 0.13, 0.24),
   ghostVertex: new THREE.CircleGeometry(0.19, 24),
   ghostRoad: new THREE.BoxGeometry(0.92, 0.11, 0.24),
@@ -134,10 +172,19 @@ function tokenTexture(n: number): THREE.CanvasTexture {
   canvas.width = canvas.height = 256
   const ctx = canvas.getContext('2d')!
   const red = n === 6 || n === 8
+  ctx.fillStyle = '#efe5ca'
+  ctx.beginPath()
+  ctx.arc(128, 128, 127, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.strokeStyle = '#c0ab76'
+  ctx.lineWidth = 3
+  ctx.beginPath()
+  ctx.arc(128, 128, 119, 0, Math.PI * 2)
+  ctx.stroke()
   ctx.fillStyle = red ? '#b3392f' : '#3d3833'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.font = 'bold 148px Georgia, "Times New Roman", serif'
+  ctx.font = `bold ${n >= 10 ? 124 : 148}px Georgia, "Times New Roman", serif`
   ctx.fillText(String(n), 128, 108)
   const pips = 6 - Math.abs(7 - n) // probability dots, as on real chits
   ctx.beginPath()
@@ -152,6 +199,68 @@ function tokenTexture(n: number): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace
   tokenTextureCache.set(n, tex)
   return tex
+}
+
+// --- harbor / port markers ----------------------------------------------------
+// Each port renders as a wooden dock with a sign: "2:1" + resource color/icon
+// for special harbors, "3:1 ?" for generic ones. All textures/materials are
+// cached per kind (6 variants total, shared by every board).
+
+const portGeo = {
+  dock: new THREE.BoxGeometry(0.85, 0.07, 0.34),
+  mooring: new THREE.CylinderGeometry(0.035, 0.04, 0.22, 8),
+  signPost: new THREE.CylinderGeometry(0.026, 0.032, 0.52, 8),
+  sign: new THREE.CircleGeometry(0.24, 48),
+  plank: new THREE.BoxGeometry(0.085, 0.025, 0.36),
+  hull: new THREE.SphereGeometry(1, 12, 8),
+}
+const portMat = {
+  wood: new THREE.MeshStandardMaterial({ color: 0x8a6a44, roughness: 0.85 }),
+  woodDark: new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 0.9 }),
+}
+
+const portSignMaterialCache = new Map<PortKind, THREE.MeshStandardMaterial>()
+function portSignMaterial(kind: PortKind): THREE.MeshStandardMaterial {
+  let mat = portSignMaterialCache.get(kind)
+  if (mat) return mat
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 256
+  const ctx = canvas.getContext('2d')!
+  const bg = '#f3e3bc'
+  // rounded background plate
+  const r = 34
+  ctx.beginPath()
+  ctx.moveTo(r, 8)
+  ctx.arcTo(248, 8, 248, 248, r)
+  ctx.arcTo(248, 248, 8, 248, r)
+  ctx.arcTo(8, 248, 8, 8, r)
+  ctx.arcTo(8, 8, 248, 8, r)
+  ctx.closePath()
+  ctx.fillStyle = bg
+  ctx.fill()
+  ctx.lineWidth = 10
+  ctx.strokeStyle = '#b18a4d'
+  ctx.stroke()
+  // ratio
+  ctx.fillStyle = '#314b42'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = 'bold 92px Georgia, serif'
+  ctx.fillText(kind === 'generic' ? '3:1' : '2:1', 128, 92)
+  ctx.font = 'bold 30px Georgia, serif'
+  ctx.fillText(kind === 'generic' ? 'ANY' : RESOURCE_LABELS[kind].toUpperCase(), 128, 178)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.anisotropy = 4
+  tex.colorSpace = THREE.SRGBColorSpace
+  mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 })
+  portSignMaterialCache.set(kind, mat)
+  return mat
+}
+
+function portHoverInfo(kind: PortKind): HoverInfo {
+  return kind === 'generic'
+    ? { terrainLabel: '3:1 Harbor', resourceLabel: null, number: null, portKind: kind }
+    : { terrainLabel: `${RESOURCE_LABELS[kind]} Harbor · 2:1`, resourceLabel: kind, number: null, portKind: kind }
 }
 
 // --- dice ---------------------------------------------------------------------
@@ -211,7 +320,7 @@ let dieMaterials: THREE.MeshStandardMaterial[] | null = null
 function getDieMaterials(): THREE.MeshStandardMaterial[] {
   if (!dieMaterials) {
     dieMaterials = dieSlotValues.map(
-      (v) => new THREE.MeshStandardMaterial({ map: dieFaceTexture(v), roughness: 0.35, metalness: 0.05 }),
+      (v) => new THREE.MeshStandardMaterial({ map: dieFaceTexture(v), color: 0xffffff, roughness: 0.5, metalness: 0, emissive: 0xf6ecd4, emissiveIntensity: 0.12 }),
     )
   }
   return dieMaterials
@@ -249,7 +358,8 @@ export class GameView {
   private controls: OrbitControls
   private resizeObserver: ResizeObserver
   private raf = 0
-  private clock = new THREE.Clock()
+  private lastFrame = performance.now()
+  private elapsed = 0
 
   // scene groups
   private boardGroup = new THREE.Group()
@@ -258,13 +368,17 @@ export class GameView {
   private diceGroup = new THREE.Group()
   private robberTilesGroup = new THREE.Group()
   private waterMesh: THREE.Mesh | null = null
+  private oceanGroup = new THREE.Group()
+  private sceneryGroup = new THREE.Group()
+  private reducedMotion = false
+  private placementAnimations: {object: THREE.Object3D; y: number; elapsed: number}[] = []
 
   // lookups
   private tileMeshes = new Map<string, THREE.Mesh>()
   private ghostVertexMeshes = new Map<string, THREE.Mesh>()
   private ghostEdgeMeshes = new Map<string, THREE.Mesh>()
   private board: Board | null = null
-  private disposables: Array<THREE.Material | THREE.BufferGeometry> = []
+  private disposables: Array<{ dispose: () => void }> = []
 
   // interaction state
   private mode: BuildMode = { kind: null, player: 0 }
@@ -290,6 +404,7 @@ export class GameView {
   private robberTileMeshes = new Map<string, THREE.Mesh>()
   private hoveredRobberTile: THREE.Mesh | null = null
   private productionPulses: { mesh: THREE.Mesh; t: number }[] = []
+  private portPickMeshes: THREE.Mesh[] = []
 
   // public callbacks
   onPick: ((target: PickTarget) => void) | null = null
@@ -298,23 +413,27 @@ export class GameView {
 
   constructor(container: HTMLElement) {
     this.container = container
+    this.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    void loadArt()
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+    this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'high-performance' })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.shadowMap.enabled = true
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer.shadowMap.type = THREE.PCFShadowMap
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.17
     this.renderer.domElement.style.display = 'block'
     this.renderer.domElement.style.touchAction = 'none'
     container.appendChild(this.renderer.domElement)
 
-    this.scene.background = new THREE.Color(SKY)
+    this.scene.background = null
     this.scene.fog = new THREE.Fog(SKY, 20, 36)
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
-    this.camera.position.set(0, 8.2, 9.6)
+    this.camera.position.set(0, 8.8, 10.0)
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
-    this.controls.target.set(0, 0.2, 0)
+    this.controls.target.set(0, 0.2, 0.8)
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.06
     this.controls.minDistance = 5
@@ -356,10 +475,24 @@ export class GameView {
   buildBoard(board: Board) {
     this.board = board
     this.clearGroup(this.boardGroup)
+    this.clearGroup(this.sceneryGroup)
+    this.clearGroup(this.oceanGroup)
+    for (const item of this.disposables) item.dispose()
+    this.disposables = []
+    this.waterMesh = null
+    for (const pulse of this.productionPulses) (pulse.mesh.material as THREE.Material).dispose()
+    this.productionPulses = []
     this.tileMeshes.clear()
 
     for (const tile of board.tiles) {
-      const mesh = new THREE.Mesh(tileGeometry, terrainMaterials.get(tile.terrain)!)
+      const border = new THREE.Mesh(tileBorderGeometry, borderMaterial)
+      border.rotation.y = Math.PI / 6
+      border.position.set(tile.x, TILE_TOP - 0.04, tile.z)
+      border.receiveShadow = true
+      this.boardGroup.add(border)
+      const top = terrainMaterials.get(tile.terrain)!
+      const side = terrainSides.get(tile.terrain)!
+      const mesh = new THREE.Mesh(tileGeometry, [side, top, side])
       mesh.rotation.y = Math.PI / 6 // align cylinder corners to 60°·k (pointy-top)
       mesh.position.set(tile.x, TILE_HEIGHT / 2, tile.z)
       mesh.castShadow = true
@@ -375,21 +508,43 @@ export class GameView {
     this.addRobber(board)
     this.buildRobberTiles(board)
     this.addOcean()
+    this.addPorts(board)
+    this.addCoast(board)
+    this.batchScenery()
     this.rebuildGhosts()
     this.setPlacements(this.placements)
 
     // cinematic intro fly-in on every new island
     this.intro = {
-      active: true,
+      active: !this.reducedMotion,
       t: 0,
       from: new THREE.Vector3(6, 15, 14),
-      to: new THREE.Vector3(0, 8.2, 9.6),
+      to: new THREE.Vector3(0, 8.8, 10.0),
     }
-    this.controls.enabled = false
+    this.controls.enabled = this.reducedMotion
+  }
+
+  resetCamera() {
+    this.intro.active = false
+    this.controls.enabled = true
+    this.controls.target.set(0, 0.2, 0.8)
+    this.camera.position.set(0, 8.8, 10.0)
+    this.controls.update()
+  }
+
+  zoom(direction: 'in' | 'out') {
+    this.intro.active = false
+    this.controls.enabled = true
+    const offset = this.camera.position.clone().sub(this.controls.target)
+    offset.setLength(THREE.MathUtils.clamp(offset.length() * (direction === 'in' ? 0.86 : 1.16), this.controls.minDistance, this.controls.maxDistance))
+    this.camera.position.copy(this.controls.target).add(offset)
+    this.controls.update()
   }
 
   setPlacements(placements: PlacementState) {
+    const previous = this.placements
     this.placements = placements
+    this.placementAnimations = []
     this.clearGroup(this.buildingsGroup)
 
     for (const [edgeId, placement] of placements.edges) {
@@ -404,6 +559,7 @@ export class GameView {
       mesh.position.set(mid.x, TILE_TOP + 0.065, mid.z)
       mesh.castShadow = true
       this.buildingsGroup.add(mesh)
+      if (!previous.edges.has(edgeId)) this.animatePlacement(mesh)
     }
 
     for (const [vertexId, placement] of placements.vertices) {
@@ -411,13 +567,21 @@ export class GameView {
       const v = this.board.vertexById.get(vertexId)
       if (!v) continue
       const group =
-        placement.type === 'city' ? this.cityMesh(placement.player) : this.settlementMesh(placement.player)
+        placement.type === 'city' ? createCity(PLAYER_COLORS[placement.player]) : createSettlement(PLAYER_COLORS[placement.player])
       group.position.set(v.x, TILE_TOP, v.z)
       group.rotation.y = mulberry32(hashString(vertexId))() * Math.PI // deterministic variety
       this.buildingsGroup.add(group)
+      if (previous.vertices.get(vertexId)?.type !== placement.type) this.animatePlacement(group)
     }
 
     this.refreshGhosts()
+  }
+
+  private animatePlacement(object: THREE.Object3D) {
+    if (this.reducedMotion) return
+    const y = object.position.y
+    object.position.y += 0.45
+    this.placementAnimations.push({ object, y, elapsed: 0 })
   }
 
   setBuildMode(mode: BuildMode) {
@@ -431,7 +595,7 @@ export class GameView {
     if (this.diceMeshes.length === 0) this.createDice()
     const restY = DIE_REST_Y
     const spawns = [new THREE.Vector3(-4.4, 2.9, 7.3), new THREE.Vector3(4.4, 3.2, 7.4)]
-    const targets = [new THREE.Vector3(-0.62, restY, 3.35), new THREE.Vector3(0.66, restY, 3.62)]
+    const targets = [new THREE.Vector3(-0.48, restY, 4.75), new THREE.Vector3(0.48, restY, 4.75)]
     const values = [die1, die2]
     const dice: DieAnim[] = this.diceMeshes.map((mesh, i) => {
       const target = targets[i].clone()
@@ -513,6 +677,8 @@ export class GameView {
     el.removeEventListener('pointerleave', this.onPointerLeave)
     for (const d of this.disposables) d.dispose()
     this.disposables = []
+    this.hoverHex.geometry.dispose()
+    ;(this.hoverHex.material as THREE.Material).dispose()
     this.renderer.dispose()
     el.remove()
   }
@@ -520,10 +686,10 @@ export class GameView {
   // -- scene construction -------------------------------------------------------
 
   private setupLights() {
-    this.scene.add(new THREE.HemisphereLight(0xdfeef7, 0x9a8f6f, 0.95))
+    this.scene.add(new THREE.HemisphereLight(0xd3e5da, 0x626551, 1.2))
 
-    const sun = new THREE.DirectionalLight(0xfff2dd, 1.6)
-    sun.position.set(6, 11, 4)
+    const sun = new THREE.DirectionalLight(0xffe2ad, 2.5)
+    sun.position.set(-4, 8, 5)
     sun.castShadow = true
     sun.shadow.mapSize.set(2048, 2048)
     sun.shadow.camera.left = -7
@@ -543,94 +709,112 @@ export class GameView {
   private addNumberToken(tile: { x: number; z: number; numberToken: number | null }) {
     const n = tile.numberToken!
     const disc = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.32, 0.32, 0.06, 24),
-      new THREE.MeshStandardMaterial({ color: 0xf5f1e6, roughness: 0.55 }),
+      new THREE.CylinderGeometry(0.325, 0.335, 0.065, 48),
+      brassMaterial,
     )
     disc.position.set(tile.x, TILE_TOP + 0.03, tile.z)
     disc.receiveShadow = true
     this.boardGroup.add(disc)
-    this.disposables.push(disc.geometry, disc.material as THREE.Material)
+    this.disposables.push(disc.geometry)
 
     const label = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.52, 0.52),
-      new THREE.MeshBasicMaterial({ map: tokenTexture(n), transparent: true }),
+      new THREE.PlaneGeometry(0.62, 0.62),
+      new THREE.MeshBasicMaterial({ map: tokenTexture(n), transparent: true, depthTest: false, depthWrite: false }),
     )
     label.rotation.x = -Math.PI / 2
-    label.position.set(tile.x, TILE_TOP + 0.062, tile.z)
+    label.position.set(tile.x, TILE_TOP + 0.08, tile.z)
+    label.renderOrder = 5 // Keep every numeral (including 12) readable through scenery.
     this.boardGroup.add(label)
     this.disposables.push(label.geometry, label.material as THREE.Material)
   }
 
   private addTileProps(tile: { id: string; x: number; z: number; terrain: import('../game/terrain').Terrain }) {
+    const seed = hashString(tile.id)
+    if (tile.terrain === 'mountains') {
+      const mountain = createMountainScenery(seed)
+      mountain.position.set(tile.x, TILE_TOP, tile.z)
+      this.sceneryGroup.add(mountain)
+      // This generated ridge is board-specific and must be released on rebuild.
+      this.disposables.push(mountain.geometry)
+      return
+    }
+    if (tile.terrain === 'forest' || tile.terrain === 'fields') {
+      const scenery = tile.terrain === 'forest' ? createForestScenery(seed) : createWheatScenery(seed)
+      scenery.position.set(tile.x, TILE_TOP, tile.z)
+      this.sceneryGroup.add(scenery)
+      return
+    }
     const rnd = mulberry32(hashString(tile.id))
-    const spot = (min: number, max: number) => {
-      const a = rnd() * Math.PI * 2
-      const d = min + rnd() * (max - min)
-      return { x: tile.x + Math.cos(a) * d, z: tile.z + Math.sin(a) * d }
-    }
-    const tree = (s: number) => {
-      const g = new THREE.Group()
-      const trunk = new THREE.Mesh(propGeo.trunk, propMat.trunk)
-      trunk.position.y = 0.07
-      const foliage = new THREE.Mesh(propGeo.foliage, propMat.foliage)
-      foliage.position.y = 0.3
-      foliage.castShadow = true
-      g.add(trunk, foliage)
-      g.scale.setScalar(s)
-      return g
-    }
-
-    const count = { forest: 4, pasture: 3, fields: 5, hills: 3, mountains: 3, desert: 2 }[tile.terrain]
+    const count = tile.terrain === 'pasture' ? 5 : tile.terrain === 'hills' ? 12 : 4
     for (let i = 0; i < count; i++) {
-      const p = spot(0.34, 0.56)
-      let prop: THREE.Object3D | null = null
-      switch (tile.terrain) {
-        case 'forest':
-          prop = tree(0.8 + rnd() * 0.6)
-          break
-        case 'pasture': {
-          prop = new THREE.Group()
-          const body = new THREE.Mesh(propGeo.sheepBody, propMat.sheepBody)
-          body.scale.set(1, 0.8, 1.25)
-          body.castShadow = true
-          const head = new THREE.Mesh(propGeo.sheepHead, propMat.sheepHead)
-          head.position.set(0, 0.03, 0.11)
-          prop.add(body, head)
-          prop.rotation.y = rnd() * Math.PI * 2
-          break
+      const angle = i / count * Math.PI * 2 + rnd() * 0.28
+      const radius = 0.5 + rnd() * 0.23
+      const prop = new THREE.Group()
+      prop.position.set(tile.x + Math.cos(angle) * radius, TILE_TOP, tile.z + Math.sin(angle) * radius)
+      prop.rotation.y = rnd() * Math.PI * 2
+      if (tile.terrain === 'pasture') {
+        const body = new THREE.Mesh(propGeo.sheepBody, propMat.sheepBody)
+        body.position.y = 0.13
+        body.scale.set(0.8, 0.8, 1.25)
+        const head = new THREE.Mesh(propGeo.sheepHead, propMat.sheepHead)
+        head.position.set(0, 0.16, 0.13)
+        prop.add(body, head)
+        for (const x of [-0.045, 0.045]) for (const z of [-0.065, 0.065]) {
+          const leg = new THREE.Mesh(propGeo.leg, propMat.sheepHead)
+          leg.position.set(x, 0.05, z)
+          prop.add(leg)
         }
-        case 'fields': {
-          prop = new THREE.Mesh(propGeo.wheat, propMat.wheat)
-          prop.castShadow = true
-          break
-        }
-        case 'hills': {
-          prop = new THREE.Mesh(propGeo.clay, propMat.clay)
-          prop.scale.set(1, 0.55, 1)
-          prop.castShadow = true
-          break
-        }
-        case 'mountains': {
-          prop = new THREE.Group()
-          const peak = new THREE.Mesh(propGeo.peak, propMat.peak)
-          peak.castShadow = true
-          const snow = new THREE.Mesh(propGeo.snow, propMat.snow)
-          snow.position.y = 0.34
-          prop.add(peak, snow)
-          prop.rotation.y = rnd() * Math.PI * 2
-          break
-        }
-        case 'desert': {
-          prop = new THREE.Mesh(propGeo.dune, propMat.dune)
-          prop.scale.set(1, 0.35, 1)
-          break
-        }
+      } else if (tile.terrain === 'hills') {
+        const rock = new THREE.Mesh(propGeo.clay, i % 3 === 0 ? propMat.trunk : propMat.clay)
+        rock.scale.set(1.2, 0.8 + rnd(), 1)
+        rock.position.y = 0.08
+        prop.add(rock)
+      } else {
+        const dune = new THREE.Mesh(propGeo.dune, propMat.dune)
+        dune.scale.set(1.5, 0.25, 0.8)
+        prop.add(dune)
       }
-      if (prop) {
-        prop.position.set(p.x, TILE_TOP, p.z)
-        this.boardGroup.add(prop)
+      this.sceneryGroup.add(prop)
+    }
+  }
+
+  private addCoast(board: Board) {
+    const rnd = mulberry32(board.seed)
+    for (const edge of board.edges.filter(edge => edge.tileIds.length === 1 && !edge.portId)) {
+      const [a, b] = edge.vertexIds.map(id => board.vertexById.get(id)!)
+      const tile = board.tileById.get(edge.tileIds[0])!
+      const mid = new THREE.Vector3((a.x + b.x) / 2, 0, (a.z + b.z) / 2)
+      const out = mid.clone().sub(new THREE.Vector3(tile.x, 0, tile.z)).normalize()
+      for (let stone = 0; stone < 3; stone++) {
+        const rock = new THREE.Mesh(propGeo.clay, propMat.rock)
+        rock.position.set(mid.x + out.x * 0.12 + (rnd() - 0.5) * 0.42, -0.015, mid.z + out.z * 0.12 + (rnd() - 0.5) * 0.42)
+        rock.scale.set(0.6 + rnd() * 0.8, 0.5 + rnd() * 0.5, 0.7 + rnd() * 0.8)
+        rock.rotation.y = rnd() * 6
+        this.sceneryGroup.add(rock)
       }
     }
+  }
+
+  /** Batch repeated scenery so the richer island adds detail without hundreds of draw calls. */
+  private batchScenery() {
+    const batches = new Map<string, { geometry: THREE.BufferGeometry; material: THREE.Material; matrices: THREE.Matrix4[] }>()
+    this.sceneryGroup.updateMatrixWorld(true)
+    this.sceneryGroup.traverse(object => {
+      if (!(object instanceof THREE.Mesh) || Array.isArray(object.material)) return
+      const key = object.geometry.uuid + object.material.uuid
+      let batch = batches.get(key)
+      if (!batch) { batch = { geometry: object.geometry, material: object.material, matrices: [] }; batches.set(key, batch) }
+      batch.matrices.push(object.matrixWorld.clone())
+    })
+    for (const batch of batches.values()) {
+      const mesh = new THREE.InstancedMesh(batch.geometry, batch.material, batch.matrices.length)
+      batch.matrices.forEach((matrix, i) => mesh.setMatrixAt(i, matrix))
+      mesh.castShadow = mesh.receiveShadow = true
+      mesh.computeBoundingSphere()
+      this.boardGroup.add(mesh)
+      this.disposables.push(mesh)
+    }
+    this.sceneryGroup.clear()
   }
 
   private addRobber(board: Board) {
@@ -693,59 +877,114 @@ export class GameView {
     }
   }
 
-  private addOcean() {
-    if (this.waterMesh) {
-      this.boardGroup.add(this.waterMesh) // re-attach after group clear
-      return
+  /** Wooden docks + labeled signs for the 9 harbors, hoverable for trade info. */
+  private addPorts(board: Board) {
+    this.portPickMeshes = []
+    for (const port of board.ports) {
+      const edge = board.edgeById.get(port.edgeId)!
+      const [a, b] = edge.vertexIds.map((id) => board.vertexById.get(id)!)
+      const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 }
+      const tile = board.tileById.get(edge.tileIds[0])!
+      const len = Math.hypot(mid.x - tile.x, mid.z - tile.z) || 1
+      const out = { x: (mid.x - tile.x) / len, z: (mid.z - tile.z) / len } // outward normal
+      const lat = { x: -out.z, z: out.x }
+      const yaw = -Math.atan2(out.z, out.x)
+
+      const g = new THREE.Group()
+
+      // dock plank reaching from the shore into the water
+      const dock = new THREE.Mesh(portGeo.dock, portMat.wood)
+      dock.position.set(mid.x + out.x * 0.55, 0.02, mid.z + out.z * 0.55)
+      dock.rotation.y = yaw
+      dock.receiveShadow = true
+      dock.userData.portKind = port.kind
+      g.add(dock)
+
+      // two mooring posts at the water end
+      for (const side of [-1, 1]) {
+        const post = new THREE.Mesh(portGeo.mooring, portMat.woodDark)
+        post.position.set(mid.x + out.x * 0.85 + lat.x * side * 0.11, 0.1, mid.z + out.z * 0.85 + lat.z * side * 0.11)
+        post.castShadow = true
+        g.add(post)
+      }
+
+      // Low ivory trade medallion: legible from above without billboard signs.
+      const face = new THREE.Mesh(portGeo.sign, portSignMaterial(port.kind))
+      face.rotation.x = -Math.PI / 2
+      face.position.set(mid.x + out.x * 0.34, 0.15, mid.z + out.z * 0.34)
+      face.userData.portKind = port.kind
+      g.add(face)
+      this.portPickMeshes.push(face)
+      // Separate narrow planks give the jetty a crafted edge.
+      for (let plank = 0; plank < 8; plank++) {
+        const board = new THREE.Mesh(portGeo.plank, portMat.woodDark)
+        board.rotation.y = yaw
+        board.position.set(mid.x + out.x * (0.2 + plank * 0.1), 0.068, mid.z + out.z * (0.2 + plank * 0.1))
+        g.add(board)
+      }
+      const boat = new THREE.Group()
+      boat.position.set(mid.x + out.x * 0.67 + lat.x * 0.33, 0.015, mid.z + out.z * 0.67 + lat.z * 0.33)
+      boat.rotation.y = yaw
+      const hull = new THREE.Mesh(portGeo.hull, portMat.woodDark)
+      hull.scale.set(0.29, 0.075, 0.11)
+      boat.add(hull)
+      const mast = new THREE.Mesh(portGeo.signPost, portMat.wood)
+      mast.position.y = 0.26
+      boat.add(mast)
+      const sailShape = new THREE.Shape()
+      sailShape.moveTo(0, 0); sailShape.lineTo(0, 0.37); sailShape.quadraticCurveTo(0.22, 0.16, 0.21, 0); sailShape.closePath()
+      const sail = new THREE.Mesh(new THREE.ShapeGeometry(sailShape), new THREE.MeshStandardMaterial({ color: 0xf5e4bc, roughness: 0.9, side: THREE.DoubleSide }))
+      sail.position.set(0, 0.12, 0)
+      this.disposables.push(sail.geometry, sail.material as THREE.Material)
+      boat.add(sail)
+      g.add(boat)
+      this.portPickMeshes.push(dock)
+
+      this.boardGroup.add(g)
     }
-    const deep = new THREE.Mesh(
-      new THREE.CylinderGeometry(7.6, 7.6, 0.3, 72),
-      new THREE.MeshStandardMaterial({ color: 0x2b6f9e, roughness: 0.25, metalness: 0.05 }),
-    )
-    deep.position.y = -0.17
-    deep.receiveShadow = true
-    const shallow = new THREE.Mesh(
-      new THREE.CylinderGeometry(5.05, 5.1, 0.28, 72),
-      new THREE.MeshStandardMaterial({ color: 0x4a94bd, roughness: 0.3 }),
-    )
-    shallow.position.y = -0.16
-    shallow.receiveShadow = true
-    this.waterMesh = deep
-    this.disposables.push(deep.geometry, deep.material as THREE.Material, shallow.geometry, shallow.material as THREE.Material)
-    this.boardGroup.add(deep, shallow)
   }
 
-  private settlementMesh(player: number): THREE.Group {
-    const mats = buildingMaterials[player]
-    const g = new THREE.Group()
-    const base = new THREE.Mesh(buildingGeo.settlementBase, mats.wall)
-    base.position.y = 0.1
-    base.castShadow = true
-    const roof = new THREE.Mesh(buildingGeo.settlementRoof, mats.roof)
-    roof.position.y = 0.31
-    roof.rotation.y = Math.PI / 4
-    roof.castShadow = true
-    g.add(base, roof)
-    return g
-  }
+  private addOcean() {
+    const water = new THREE.Mesh(new THREE.CylinderGeometry(5.87, 5.87, 0.18, 6), oceanMaterial)
+    water.rotation.y = Math.PI / 6
+    water.position.y = -0.17
+    water.receiveShadow = true
 
-  private cityMesh(player: number): THREE.Group {
-    const mats = buildingMaterials[player]
-    const g = new THREE.Group()
-    const base = new THREE.Mesh(buildingGeo.cityBase, mats.wall)
-    base.position.y = 0.1
+    const hexRing = (outer: number, inner: number, depth: number) => {
+      const shape = new THREE.Shape()
+      const hole = new THREE.Path()
+      for (let i = 0; i <= 6; i++) {
+        const angle = i * Math.PI / 3
+        const x = Math.cos(angle), y = Math.sin(angle)
+        if (i === 0) { shape.moveTo(x * outer, y * outer); hole.moveTo(x * inner, -y * inner) }
+        else { shape.lineTo(x * outer, y * outer); hole.lineTo(x * inner, -y * inner) }
+      }
+      shape.holes.push(hole)
+      const geometry = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelSize: 0.025, bevelThickness: 0.025, bevelSegments: 2, steps: 1 })
+      geometry.rotateX(-Math.PI / 2)
+      return geometry
+    }
+    const frame = new THREE.Mesh(hexRing(6.14, 5.88, 0.27), frameMaterial)
+    frame.position.y = -0.33
+    frame.castShadow = frame.receiveShadow = true
+    const inlay = new THREE.Mesh(hexRing(5.93, 5.895, 0.018), brassMaterial)
+    inlay.position.y = -0.025
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(6.12, 6.18, 0.17, 6), frameMaterial)
+    base.rotation.y = Math.PI / 6
+    base.position.y = -0.38
     base.castShadow = true
-    const roof = new THREE.Mesh(buildingGeo.cityRoof, mats.roof)
-    roof.position.set(0, 0.28, 0.06)
-    roof.rotation.y = Math.PI / 4
-    const tower = new THREE.Mesh(buildingGeo.cityTower, mats.wall)
-    tower.position.set(-0.12, 0.17, -0.04)
-    tower.castShadow = true
-    const towerRoof = new THREE.Mesh(buildingGeo.cityTowerRoof, mats.roof)
-    towerRoof.position.set(-0.12, 0.41, -0.04)
-    towerRoof.rotation.y = Math.PI / 4
-    g.add(base, roof, tower, towerRoof)
-    return g
+    this.waterMesh = water
+    this.disposables.push(water.geometry, frame.geometry, inlay.geometry, base.geometry)
+    this.oceanGroup.add(base, frame, inlay, water)
+    const nailGeometry = new THREE.SphereGeometry(0.048, 12, 8)
+    this.disposables.push(nailGeometry)
+    for (let corner = 0; corner < 6; corner++) {
+      const nail = new THREE.Mesh(nailGeometry, brassMaterial)
+      nail.scale.y = 0.45
+      nail.position.set(Math.cos(corner * Math.PI / 3) * 5.99, -0.028, Math.sin(corner * Math.PI / 3) * 5.99)
+      this.oceanGroup.add(nail)
+    }
+    this.boardGroup.add(this.oceanGroup)
   }
 
   // -- ghosts (build spot picking) ------------------------------------------------
@@ -759,8 +998,12 @@ export class GameView {
     for (const v of this.board.vertices) {
       const mesh = new THREE.Mesh(
         buildingGeo.ghostVertex,
-        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.4, depthWrite: false }),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.25, depthWrite: false }),
       )
+      const outline = new THREE.Mesh(new THREE.RingGeometry(0.145, 0.17, 24), new THREE.MeshBasicMaterial({color:0xffe2a0, transparent:true, opacity:0.8, depthWrite:false}))
+      outline.position.z = 0.002
+      mesh.add(outline)
+      this.disposables.push(outline.geometry, outline.material as THREE.Material)
       mesh.rotation.x = -Math.PI / 2
       mesh.position.set(v.x, TILE_TOP + 0.015, v.z)
       mesh.userData = { kind: 'vertex', id: v.id }
@@ -844,6 +1087,15 @@ export class GameView {
     }
 
     if (!ghost) {
+      const portHits = this.raycaster.intersectObjects(this.portPickMeshes, false)
+      const portMesh = portHits[0]?.object as THREE.Mesh | undefined
+      if (portMesh) {
+        this.container.style.cursor = 'pointer'
+        this.hoverHex.visible = false
+        this.onHover?.(portHoverInfo(portMesh.userData.portKind as PortKind))
+        return
+      }
+      this.container.style.cursor = 'default'
       const tileHits = this.raycaster.intersectObjects([...this.tileMeshes.values()], false)
       const tileMesh = tileHits[0]?.object as THREE.Mesh | undefined
       if (tileMesh) {
@@ -924,20 +1176,28 @@ export class GameView {
     const w = this.container.clientWidth || 1
     const h = this.container.clientHeight || 1
     this.camera.aspect = w / h
+    this.camera.fov = this.camera.aspect >= 1.45 ? 40 : THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(40 / 2)) * 1.45 / this.camera.aspect))
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(w, h, false)
   }
 
   private animate = () => {
     this.raf = requestAnimationFrame(this.animate)
-    const dt = this.clock.getDelta()
-    const t = this.clock.elapsedTime
+    const now = performance.now()
+    const dt = Math.min((now - this.lastFrame) / 1000, 0.05)
+    this.lastFrame = now
+    const t = this.elapsed += dt
+    this.placementAnimations = this.placementAnimations.filter(animation => {
+      animation.elapsed = Math.min(1, animation.elapsed + dt / 0.32)
+      animation.object.position.y = animation.y + 0.45 * Math.pow(1 - animation.elapsed, 3)
+      return animation.elapsed < 1
+    })
 
     if (this.intro.active) {
       this.intro.t = Math.min(1, this.intro.t + dt / 1.3)
       const e = 1 - Math.pow(1 - this.intro.t, 3) // ease-out cubic
       this.camera.position.lerpVectors(this.intro.from, this.intro.to, e)
-      this.camera.lookAt(0, 0.2, 0)
+      this.camera.lookAt(0, 0.2, 0.8)
       if (this.intro.t >= 1) {
         this.intro.active = false
         this.controls.enabled = true
@@ -947,7 +1207,7 @@ export class GameView {
       this.controls.update()
     }
 
-    if (this.waterMesh) this.waterMesh.position.y = -0.17 + Math.sin(t * 0.7) * 0.018
+    if (this.waterMesh && !this.reducedMotion) this.waterMesh.position.y = -0.17 + Math.sin(t * 0.7) * 0.008
 
     this.updateDice(dt)
     this.updateRobber(dt, t)
@@ -1056,7 +1316,7 @@ export class GameView {
   private clearGroup(group: THREE.Group) {
     if (group === this.boardGroup) {
       // keep the ocean + robber meshes out of the disposables double-free path
-      this.waterMesh?.removeFromParent()
+      this.oceanGroup.removeFromParent()
       this.robber?.removeFromParent()
     }
     for (const child of [...group.children]) child.removeFromParent()

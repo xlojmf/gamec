@@ -1,6 +1,7 @@
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 
 import appCss from '../styles.css?url'
+import gameCss from '../game-ui.css?url'
 
 export const Route = createRootRoute({
   head: () => ({
@@ -14,7 +15,7 @@ export const Route = createRootRoute({
           'A 3D browser adaptation of the classic settler’s game — Three.js, TanStack Start, boardgame.io.',
       },
     ],
-    links: [{ rel: 'stylesheet', href: appCss }, { rel: 'icon', href: '/favicon.svg' }],
+    links: [{ rel: 'stylesheet', href: appCss }, { rel: 'stylesheet', href: gameCss }, { rel: 'icon', href: '/favicon.svg' }],
   }),
   shellComponent: RootDocument,
 })

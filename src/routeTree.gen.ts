@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as GameRouteImport } from './routes/game'
+import { Route as OnlineRouteImport } from './routes/online'
 import { Route as RulesRouteImport } from './routes/rules'
 
 const IndexRoute = IndexRouteImport.update({
@@ -23,6 +24,11 @@ const GameRoute = GameRouteImport.update({
   path: '/game',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OnlineRoute = OnlineRouteImport.update({
+  id: '/online',
+  path: '/online',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RulesRoute = RulesRouteImport.update({
   id: '/rules',
   path: '/rules',
@@ -32,30 +38,34 @@ const RulesRoute = RulesRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/game': typeof GameRoute
+  '/online': typeof OnlineRoute
   '/rules': typeof RulesRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/game': typeof GameRoute
+  '/online': typeof OnlineRoute
   '/rules': typeof RulesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/game': typeof GameRoute
+  '/online': typeof OnlineRoute
   '/rules': typeof RulesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/game' | '/rules'
+  fullPaths: '/' | '/game' | '/online' | '/rules'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/game' | '/rules'
-  id: '__root__' | '/' | '/game' | '/rules'
+  to: '/' | '/game' | '/online' | '/rules'
+  id: '__root__' | '/' | '/game' | '/online' | '/rules'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   GameRoute: typeof GameRoute
+  OnlineRoute: typeof OnlineRoute
   RulesRoute: typeof RulesRoute
 }
 
@@ -75,6 +85,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GameRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/online': {
+      id: '/online'
+      path: '/online'
+      fullPath: '/online'
+      preLoaderRoute: typeof OnlineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/rules': {
       id: '/rules'
       path: '/rules'
@@ -88,6 +105,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   GameRoute: GameRoute,
+  OnlineRoute: OnlineRoute,
   RulesRoute: RulesRoute,
 }
 export const routeTree = rootRouteImport

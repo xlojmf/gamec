@@ -106,12 +106,18 @@ export interface LastProduction {
 
 export interface GameState {
   seed: number
+  /** Room size (3 or 4) — sizes hands + the setup draft snake. */
+  numPlayers: number
   robberTileId: string
   hands: ResourceCounts[]
   bank: ResourceCounts
   buildings: { vertices: Record<VertexId, Building>; edges: Record<EdgeId, RoadSpot> }
   /** Completed setup placements (0–8). */
   setupPlacements: number
+  /** Opening-roll totals for turn order (null = not rolled yet). */
+  openingRolls: (number | null)[]
+  /** Seat that won the opening roll (set once every seat has rolled). */
+  firstPlayer: number | null
   /** True once the current player rolled this turn. */
   rolled: boolean
   lastRoll: LastRoll | null
@@ -124,12 +130,15 @@ export interface GameState {
   stealTargets: number[] | null
   /** A domestic trade awaiting the partner's response (null = none). */
   pendingTrade: PendingTrade | null
+  lastBuild?: { kind: 'road' | 'settlement' | 'city'; id: string; player: number; turn: number; longestRoad: GameState['longestRoad']; largestArmy: GameState['largestArmy'] } | null
   /** Remaining development deck (top = index 0). */
   devDeck: DevCardType[]
   /** Per-player dev cards in hand (VP cards stay hidden until the win). */
   devHands: DevCardEntry[][]
   /** ctx.turn of the last dev card played — one per turn. */
   devPlayedAtTurn: number
+  /** Public record; only played cards are revealed, never purchases. */
+  lastPlayedCard?: { player: number; card: DevCardType; turn: number; sequence: number }
   /** Revealed knights per player (Largest Army metric). */
   playedKnights: number[]
   /** Pending dev-card effect within the current turn (mirrors robberStep). */
@@ -138,13 +147,20 @@ export interface GameState {
   roadBuildingLeft: number
   longestRoad: { player: number; size: number } | null
   largestArmy: { player: number; size: number } | null
+  /** Seat display names (multiplayer aliases override the color defaults). */
+  playerNames: string[]
   log: string[]
+  /** playerView extras (multiplayer clients only): card totals for hidden hands. */
+  handSizes?: number[]
+  devHandSizes?: number[]
 }
 
 /** A proposed domestic trade: proposer gives `give`, receives `take`. */
 export interface PendingTrade {
   proposer: number
   partner: number
+  /** Remaining recipients; omitted for a one-to-one offer and older saves. */
+  partners?: number[]
   give: ResourceCounts
   take: ResourceCounts
 }
@@ -201,6 +217,21 @@ export function boardFor(seed: number): Board {
 }
 
 const PLAYER_NAMES = ['Red', 'Blue', 'Orange', 'White']
+
+/** Display name for a seat — per-game names once set (multiplayer aliases). */
+function pname(G: GameState, player: number): string {
+  return G.playerNames?.[player] ?? PLAYER_NAMES[player] ?? `Seat ${player}`
+}
+
+/** A player's chosen display name (multiplayer): own seat only, any phase. */
+function setPlayerName({ G, ctx, playerID }: MoveArgs, name: unknown) {
+  if (!G) return INVALID
+  const p = Number(playerID)
+  if (p !== Number(ctx.currentPlayer)) return INVALID
+  const clean = String(name ?? '').replace(/\s+/g, ' ').trim().slice(0, 24)
+  if (!clean || clean === G.playerNames[p]) return INVALID
+  G.playerNames[p] = clean
+}
 
 export function vpCounts(G: GameState): number[] {
   const vps = Array.from({ length: G.hands.length }, () => 0)
@@ -373,8 +404,8 @@ export function robberVictims(G: GameState, tileId: string, mover: number): numb
 }
 
 function pushLog(G: GameState, text: string) {
+  G.lastBuild = null
   G.log.unshift(text)
-  if (G.log.length > 30) G.log.length = 30
 }
 
 /** Apply production for a roll, updating hands + bank (PRD §5.3.1). */
@@ -411,7 +442,7 @@ function beginRobberFlow(G: GameState, events: EventsShape) {
   }
   G.robberStep = 'discard'
   G.pendingDiscards = Object.fromEntries(discarders.map((d) => [d.p, d.required]))
-  for (const d of discarders) pushLog(G, `${PLAYER_NAMES[d.p]} must discard ${d.required}`)
+  for (const d of discarders) pushLog(G, `${pname(G, d.p)} must discard ${d.required}`)
   events.setActivePlayers({
     value: Object.fromEntries(discarders.map((d) => [String(d.p), { stage: 'discard' }])),
   })
@@ -425,7 +456,7 @@ function doSteal(G: GameState, victim: number, thief: number, die: (n: number) =
   const card = pool[die(pool.length) - 1]
   G.hands[victim] = { ...G.hands[victim], [card]: G.hands[victim][card] - 1 }
   G.hands[thief] = { ...G.hands[thief], [card]: G.hands[thief][card] + 1 }
-  pushLog(G, `${PLAYER_NAMES[thief]} stole a card from ${PLAYER_NAMES[victim]}`)
+  pushLog(G, `${pname(G, thief)} stole a card from ${pname(G, victim)}`)
   return card
 }
 
@@ -454,6 +485,42 @@ function grantSetupResources(G: GameState, player: number, vertexId: VertexId) {
 
 // -- moves ---------------------------------------------------------------------
 
+/**
+ * Opening roll (PRD §5.2): every seat throws the dice; the highest total
+ * decides who places first (ties re-roll, official rule). Each player acts on
+ * their own turn; the phase ends when every seat has a total.
+ */
+function openingRoll({ G, ctx, playerID, random, events }: MoveArgs) {
+  if (!G) return INVALID
+  const p = Number(playerID)
+  if (p !== Number(ctx.currentPlayer)) return INVALID
+  if (G.firstPlayer !== null || G.openingRolls[p] !== null) return INVALID
+
+  let die1 = random!.Die(6)
+  let die2 = random!.Die(6)
+  let sum = die1 + die2
+  // tie → re-roll until the total is unique (bounded for safety)
+  const taken = new Set(G.openingRolls.filter((r): r is number => r !== null))
+  for (let guard = 0; taken.has(sum) && guard < 40; guard++) {
+    die1 = random!.Die(6)
+    die2 = random!.Die(6)
+    sum = die1 + die2
+  }
+  G.openingRolls[p] = sum
+  G.lastRoll = { die1, die2, sum, nonce: ctx.turn }
+  pushLog(G, `${pname(G, p)} rolled ${sum} for turn order`)
+
+  if (G.openingRolls.every((r) => r !== null)) {
+    let best = 0
+    G.openingRolls.forEach((r, i) => {
+      if ((r ?? 0) > (G.openingRolls[best] ?? 0)) best = i
+    })
+    G.firstPlayer = best
+    pushLog(G, `${pname(G, best)} rolled highest — ${pname(G, best)} starts`)
+  }
+  events?.endTurn()
+}
+
 function placeSetup({ G, ctx, events }: MoveArgs, vertexId: VertexId, edgeId: EdgeId) {
   if (!G) return INVALID
   const player = Number(ctx.currentPlayer)
@@ -467,9 +534,9 @@ function placeSetup({ G, ctx, events }: MoveArgs, vertexId: VertexId, edgeId: Ed
 
   G.buildings.vertices[vertexId] = { player, type: 'settlement' }
   G.buildings.edges[edgeId] = { player }
-  const secondRound = G.setupPlacements >= 4
+  const secondRound = G.setupPlacements >= (G.numPlayers ?? 4)
   G.setupPlacements++
-  pushLog(G, `${PLAYER_NAMES[player]} placed a settlement${secondRound ? ' (2nd)' : ''} + road`)
+  pushLog(G, `${pname(G, player)} placed a settlement${secondRound ? ' (2nd)' : ''} + road`)
   if (secondRound) grantSetupResources(G, player, vertexId)
   updateAwards(G)
 
@@ -514,7 +581,7 @@ function discardHalf({ G, ctx, playerID, events }: MoveArgs, cards: Partial<Reso
   G.hands[player] = hand
   G.bank = bank
   delete G.pendingDiscards[player]
-  pushLog(G, `${PLAYER_NAMES[player]} discarded ${required}`)
+  pushLog(G, `${pname(G, player)} discarded ${required}`)
   if (Object.keys(G.pendingDiscards).length === 0) {
     G.robberStep = 'move'
     G.pendingDiscards = {}
@@ -530,7 +597,7 @@ function moveRobber({ G, ctx, random }: MoveArgs, tileId: string) {
   if (!board.tileById.has(tileId)) return INVALID
 
   G.robberTileId = tileId
-  pushLog(G, `${PLAYER_NAMES[Number(ctx.currentPlayer)]} moved the robber`)
+  pushLog(G, `${pname(G, Number(ctx.currentPlayer))} moved the robber`)
   const mover = Number(ctx.currentPlayer)
   const victims = robberVictims(G, tileId, mover)
   if (victims.length === 0) {
@@ -557,10 +624,12 @@ function placeSettlement({ G, ctx }: MoveArgs, vertexId: VertexId) {
   if (!G.rolled || G.robberStep || G.devStep) return INVALID
   const player = Number(ctx.currentPlayer)
   if (!validSettlementVertices(G, player).includes(vertexId)) return INVALID
+  const undo = buildUndo(G, ctx, 'settlement', vertexId)
   payCost(G, player, BUILD_COSTS.settlement)
   G.buildings.vertices[vertexId] = { player, type: 'settlement' }
-  pushLog(G, `${PLAYER_NAMES[player]} built a settlement (${costLabel(BUILD_COSTS.settlement)})`)
+  pushLog(G, `${pname(G, player)} built a settlement (${costLabel(BUILD_COSTS.settlement)})`)
   updateAwards(G) // a new settlement can cut an opponent's road
+  G.lastBuild = undo
 }
 
 function placeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
@@ -568,10 +637,12 @@ function placeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
   if (!G.rolled || G.robberStep || G.devStep) return INVALID
   const player = Number(ctx.currentPlayer)
   if (!validRoadEdges(G, player).includes(edgeId)) return INVALID
+  const undo = buildUndo(G, ctx, 'road', edgeId)
   payCost(G, player, BUILD_COSTS.road)
   G.buildings.edges[edgeId] = { player }
-  pushLog(G, `${PLAYER_NAMES[player]} built a road (${costLabel(BUILD_COSTS.road)})`)
+  pushLog(G, `${pname(G, player)} built a road (${costLabel(BUILD_COSTS.road)})`)
   updateAwards(G)
+  G.lastBuild = undo
 }
 
 function upgradeCity({ G, ctx }: MoveArgs, vertexId: VertexId) {
@@ -579,10 +650,33 @@ function upgradeCity({ G, ctx }: MoveArgs, vertexId: VertexId) {
   if (!G.rolled || G.robberStep || G.devStep) return INVALID
   const player = Number(ctx.currentPlayer)
   if (!validCityVertices(G, player).includes(vertexId)) return INVALID
+  const undo = buildUndo(G, ctx, 'city', vertexId)
   payCost(G, player, BUILD_COSTS.city)
   G.buildings.vertices[vertexId] = { player, type: 'city' }
-  pushLog(G, `${PLAYER_NAMES[player]} upgraded a city (${costLabel(BUILD_COSTS.city)})`)
+  pushLog(G, `${pname(G, player)} upgraded a city (${costLabel(BUILD_COSTS.city)})`)
   updateAwards(G)
+  G.lastBuild = undo
+}
+
+function buildUndo(G: GameState, ctx: CtxShape, kind: 'road' | 'settlement' | 'city', id: string): NonNullable<GameState['lastBuild']> {
+  return { kind, id, player: Number(ctx.currentPlayer), turn: ctx.turn,
+    longestRoad: G.longestRoad ? { ...G.longestRoad } : null,
+    largestArmy: G.largestArmy ? { ...G.largestArmy } : null }
+}
+
+/** Only the most recent paid placement, before any subsequent logged action. */
+function undoBuild({ G, ctx }: MoveArgs) {
+  const undo = G?.lastBuild
+  if (!G || !undo || undo.player !== Number(ctx.currentPlayer) || undo.turn !== ctx.turn || G.pendingTrade || G.robberStep || G.devStep) return INVALID
+  const cost = BUILD_COSTS[undo.kind]
+  if (RESOURCES.some(r => G.bank[r] < (cost[r] ?? 0))) return INVALID
+  if (undo.kind === 'road') delete G.buildings.edges[undo.id]
+  else if (undo.kind === 'city') G.buildings.vertices[undo.id] = {player: undo.player, type: 'settlement'}
+  else delete G.buildings.vertices[undo.id]
+  for (const r of RESOURCES) { G.bank[r] -= cost[r] ?? 0; G.hands[undo.player][r] += cost[r] ?? 0 }
+  G.longestRoad = undo.longestRoad
+  G.largestArmy = undo.largestArmy
+  pushLog(G, `${pname(G, undo.player)} undid the last ${undo.kind}; resources returned`)
 }
 
 // -- development cards (M11) -------------------------------------------------------
@@ -598,7 +692,7 @@ function buyDevCard({ G, ctx }: MoveArgs) {
   const card = G.devDeck[0]
   G.devDeck = G.devDeck.slice(1)
   G.devHands[player] = [...G.devHands[player], { card, boughtTurn: ctx.turn }]
-  pushLog(G, `${PLAYER_NAMES[player]} bought a development card (${G.devDeck.length} left)`) // draw stays secret
+  pushLog(G, `${pname(G, player)} bought a development card (${G.devDeck.length} left)`) // draw stays secret
   // a VP card may complete 10 VP — endIf checks vpCounts right after this move
 }
 
@@ -607,7 +701,10 @@ function devCardPlayable(G: GameState, player: number, ctxTurn: number, index: n
   const entry = G.devHands[player]?.[index]
   if (!entry) return null
   if (entry.card === 'victoryPoint') return null // VP cards count automatically, never "played"
-  if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return null
+  // dev cards may be played before OR after rolling (official rules) — e.g. a
+  // Knight before the throw. The robber flow simply blocks the roll until it
+  // resolves (the `roll` move rejects while robberStep is set).
+  if (G.robberStep || G.pendingTrade || G.devStep) return null
   if (G.devPlayedAtTurn === ctxTurn) return null // at most one dev card per turn
   if (entry.boughtTurn === ctxTurn) return null // never the card bought this turn
   return entry
@@ -618,21 +715,22 @@ function playDevCard({ G, ctx }: MoveArgs, index: number, monopolyResource?: Res
   const player = Number(ctx.currentPlayer)
   const entry = devCardPlayable(G, player, ctx.turn, index)
   if (!entry) return INVALID
-  if (entry.card === 'monopoly' && !monopolyResource) return INVALID
+  if (entry.card === 'monopoly' && (!monopolyResource || !RESOURCES.includes(monopolyResource))) return INVALID
 
   G.devHands[player] = G.devHands[player].filter((_, i) => i !== index)
   G.devPlayedAtTurn = ctx.turn
+  G.lastPlayedCard = { player, card: entry.card, turn: ctx.turn, sequence: (G.lastPlayedCard?.sequence ?? 0) + 1 }
 
   switch (entry.card) {
     case 'knight': {
       G.playedKnights[player]++
-      pushLog(G, `${PLAYER_NAMES[player]} played a Knight (${G.playedKnights[player]} total)`)
+      pushLog(G, `${pname(G, player)} played a Knight (${G.playedKnights[player]} total)`)
       updateAwards(G)
       G.robberStep = 'move' // reuse the standard robber flow (no discard step)
       break
     }
     case 'roadBuilding': {
-      pushLog(G, `${PLAYER_NAMES[player]} played Road Building — place up to 2 free roads`)
+      pushLog(G, `${pname(G, player)} played Road Building — place up to 2 free roads`)
       G.devStep = 'roadBuilding'
       G.roadBuildingLeft = 2
       if (connectedRoadEdges(G, player).length === 0) {
@@ -642,7 +740,7 @@ function playDevCard({ G, ctx }: MoveArgs, index: number, monopolyResource?: Res
       break
     }
     case 'yearOfPlenty': {
-      pushLog(G, `${PLAYER_NAMES[player]} played Year of Plenty`)
+      pushLog(G, `${pname(G, player)} played Year of Plenty`)
       G.devStep = 'yearOfPlenty'
       break
     }
@@ -659,7 +757,7 @@ function playDevCard({ G, ctx }: MoveArgs, index: number, monopolyResource?: Res
       const hand = { ...G.hands[player] }
       hand[r] += collected
       G.hands[player] = hand
-      pushLog(G, `${PLAYER_NAMES[player]} monopolized ${RESOURCE_ICONS[r]} — collected ${collected}`)
+      pushLog(G, `${pname(G, player)} monopolized ${RESOURCE_ICONS[r]} — collected ${collected}`)
       break
     }
   }
@@ -674,7 +772,7 @@ function placeFreeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
 
   G.buildings.edges[edgeId] = { player }
   G.roadBuildingLeft--
-  pushLog(G, `${PLAYER_NAMES[player]} placed a free road (${G.roadBuildingLeft} left)`)
+  pushLog(G, `${pname(G, player)} placed a free road (${G.roadBuildingLeft} left)`)
   updateAwards(G)
   if (G.roadBuildingLeft === 0 || connectedRoadEdges(G, player).length === 0) {
     G.devStep = null
@@ -682,10 +780,18 @@ function placeFreeRoad({ G, ctx }: MoveArgs, edgeId: EdgeId) {
   }
 }
 
-/** Take Year of Plenty's 2 resources from the bank (may be the same). */
+/** Forfeit remaining free roads so the turn can continue. */
+function finishRoadBuilding({ G }: MoveArgs) {
+  if (!G || G.devStep !== 'roadBuilding') return INVALID
+  G.devStep = null
+  G.roadBuildingLeft = 0
+  pushLog(G, 'Finished Road Building')
+}
+
 function takeYearOfPlenty({ G, ctx }: MoveArgs, r1: Resource, r2: Resource) {
   if (!G) return INVALID
   if (G.devStep !== 'yearOfPlenty') return INVALID
+  if (!RESOURCES.includes(r1) || !RESOURCES.includes(r2)) return INVALID
   const need = emptyResourceCounts()
   need[r1] += 1
   need[r2] += 1
@@ -702,12 +808,13 @@ function takeYearOfPlenty({ G, ctx }: MoveArgs, r1: Resource, r2: Resource) {
   G.hands[player] = hand
   G.bank = bank
   G.devStep = null
-  pushLog(G, `${PLAYER_NAMES[player]} took ${countsLabel(need)} from the bank (Year of Plenty)`)
+  pushLog(G, `${pname(G, player)} took ${countsLabel(need)} from the bank (Year of Plenty)`)
 }
 
 /** Maritime trade: give `rate` of one resource for 1 of another (PRD §5.3.2). */
 function tradeBank({ G, ctx }: MoveArgs, give: Resource, take: Resource) {
   if (!G) return INVALID
+  if (!RESOURCES.includes(give) || !RESOURCES.includes(take)) return INVALID
   if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return INVALID
   if (give === take) return INVALID
   const player = Number(ctx.currentPlayer)
@@ -724,19 +831,20 @@ function tradeBank({ G, ctx }: MoveArgs, give: Resource, take: Resource) {
   G.hands[player] = hand
   G.bank = bank
   const via = rate === 4 ? ' with the bank' : rate === 3 ? ' via a 3:1 port' : ' via a 2:1 port'
-  pushLog(G, `${PLAYER_NAMES[player]} traded ${rate}${RESOURCE_ICONS[give]} for 1${RESOURCE_ICONS[take]}${via}`)
+  pushLog(G, `${pname(G, player)} traded ${rate}${RESOURCE_ICONS[give]} for 1${RESOURCE_ICONS[take]}${via}`)
 }
 
 function proposeTrade(
   { G, ctx, events }: MoveArgs,
-  partnerId: number,
+  partnerId: number | number[],
   give: Partial<ResourceCounts>,
   take: Partial<ResourceCounts>,
 ) {
   if (!G) return INVALID
   if (!G.rolled || G.robberStep || G.pendingTrade || G.devStep) return INVALID
   const proposer = Number(ctx.currentPlayer)
-  if (partnerId === proposer || partnerId < 0 || partnerId >= G.hands.length) return INVALID
+  let partners = Array.isArray(partnerId) ? [...new Set(partnerId)] : [partnerId]
+  if (!partners.length || partners.some(p => !Number.isInteger(p) || p === proposer || p < 0 || p >= G.hands.length)) return INVALID
 
   const normGive = emptyResourceCounts()
   const normTake = emptyResourceCounts()
@@ -745,22 +853,24 @@ function proposeTrade(
   for (const r of RESOURCES) {
     const g = give[r] ?? 0
     const t = take[r] ?? 0
-    if (g < 0 || t < 0) return INVALID
+    if (!Number.isInteger(g) || !Number.isInteger(t) || g < 0 || t < 0) return INVALID
     if (g > 0 && t > 0) return INVALID // may not trade identical resources
-    if (g > G.hands[proposer][r] || t > G.hands[partnerId][r]) return INVALID
+    if (g > G.hands[proposer][r]) return INVALID
     normGive[r] = g
     normTake[r] = t
     giveTotal += g
     takeTotal += t
   }
   if (giveTotal < 1 || takeTotal < 1) return INVALID
+  partners = partners.filter(p => RESOURCES.every(r => normTake[r] <= G.hands[p][r]))
+  if (!partners.length) return INVALID
 
-  G.pendingTrade = { proposer, partner: partnerId, give: normGive, take: normTake }
+  G.pendingTrade = { proposer, partner: partners[0], give: normGive, take: normTake, ...(partners.length > 1 ? {partners} : {}) }
   pushLog(
     G,
-    `${PLAYER_NAMES[proposer]} offers ${PLAYER_NAMES[partnerId]}: ${countsLabel(normGive)} for ${countsLabel(normTake)}`,
+    `${pname(G, proposer)} offers ${partners.map(p => pname(G, p)).join(', ')}: ${countsLabel(normGive)} for ${countsLabel(normTake)}`,
   )
-  events?.setActivePlayers({ value: { [String(partnerId)]: { stage: 'respond' } } })
+  events?.setActivePlayers({ value: Object.fromEntries(partners.map(p => [String(p), {stage: 'respond'}])) })
 }
 
 function acceptTrade({ G, ctx, playerID, events }: MoveArgs) {
@@ -768,23 +878,25 @@ function acceptTrade({ G, ctx, playerID, events }: MoveArgs) {
   const t = G.pendingTrade
   if (!t) return INVALID
   if (ctx.activePlayers?.[playerID as string] !== 'respond') return INVALID
-  if (Number(playerID) !== t.partner) return INVALID
+  const partner = Number(playerID)
+  if (!(t.partners ?? [t.partner]).includes(partner)) return INVALID
 
   const proposerHand = { ...G.hands[t.proposer] }
-  const partnerHand = { ...G.hands[t.partner] }
+  const partnerHand = { ...G.hands[partner] }
   for (const r of RESOURCES) {
     if (proposerHand[r] < t.give[r] || partnerHand[r] < t.take[r]) return INVALID
     proposerHand[r] += t.take[r] - t.give[r]
     partnerHand[r] += t.give[r] - t.take[r]
   }
   G.hands[t.proposer] = proposerHand
-  G.hands[t.partner] = partnerHand
+  G.hands[partner] = partnerHand
   G.pendingTrade = null
   pushLog(
     G,
-    `${PLAYER_NAMES[t.partner]} accepted ${countsLabel(t.give)} ⇄ ${countsLabel(t.take)} from ${PLAYER_NAMES[t.proposer]}`,
+    `${pname(G, partner)} accepted ${countsLabel(t.give)} ⇄ ${countsLabel(t.take)} from ${pname(G, t.proposer)}`,
   )
-  events?.endStage()
+  if (t.partners) events?.setActivePlayers({ value: {} })
+  else events?.endStage()
 }
 
 function declineTrade({ G, ctx, playerID, events }: MoveArgs) {
@@ -792,10 +904,30 @@ function declineTrade({ G, ctx, playerID, events }: MoveArgs) {
   const t = G.pendingTrade
   if (!t) return INVALID
   if (ctx.activePlayers?.[playerID as string] !== 'respond') return INVALID
-  if (Number(playerID) !== t.partner) return INVALID
-  G.pendingTrade = null
-  pushLog(G, `${PLAYER_NAMES[t.partner]} declined the trade`)
+  const partner = Number(playerID)
+  if (!(t.partners ?? [t.partner]).includes(partner)) return INVALID
+  const remaining = (t.partners ?? [t.partner]).filter(p => p !== partner)
+  G.pendingTrade = remaining.length ? { ...t, partner: remaining[0], partners: remaining } : null
+  pushLog(G, `${pname(G, partner)} declined the trade`)
   events?.endStage()
+}
+
+/** A counter replaces the pending offer with a one-to-one negotiation. */
+function counterTrade({ G, ctx, playerID, events }: MoveArgs, give: Partial<ResourceCounts>, take: Partial<ResourceCounts>) {
+  const pending = G?.pendingTrade
+  const proposer = Number(playerID)
+  if (!G || !pending || ctx.activePlayers?.[playerID as string] !== 'respond' || !(pending.partners ?? [pending.partner]).includes(proposer)) return INVALID
+  const partner = pending.proposer
+  const normGive = emptyResourceCounts(), normTake = emptyResourceCounts()
+  for (const r of RESOURCES) {
+    const g = give[r] ?? 0, t = take[r] ?? 0
+    if (!Number.isInteger(g) || !Number.isInteger(t) || g < 0 || t < 0 || (g > 0 && t > 0) || g > G.hands[proposer][r] || t > G.hands[partner][r]) return INVALID
+    normGive[r] = g; normTake[r] = t
+  }
+  if (totalCards(normGive) < 1 || totalCards(normTake) < 1) return INVALID
+  G.pendingTrade = {proposer, partner, give: normGive, take: normTake}
+  pushLog(G, `${pname(G, proposer)} countered ${pname(G, partner)}: ${countsLabel(normGive)} for ${countsLabel(normTake)}`)
+  events?.setActivePlayers({value: {[String(partner)]: {stage: 'respond'}}})
 }
 
 function endTurn({ G, events }: MoveArgs) {
@@ -811,119 +943,199 @@ function endTurn({ G, events }: MoveArgs) {
 
 // -- game definition -----------------------------------------------------------
 
-/** Snake draft order: turns 1–4 → players 0–3, turns 5–8 → players 3–0. */
+/**
+ * Snake draft order from the opening-roll winner: placements 0..n-1 go
+ * clockwise from `firstPlayer`, placements n..2n-1 come back (so the winner
+ * also places LAST and therefore opens the main phase — official rules).
+ * Position is derived from G.setupPlacements, not ctx.turn — turn numbers
+ * differ between hotseat (setup starts at turn 1) and multiplayer (after the
+ * opening-roll phase).
+ */
 const setupOrder = {
-  first: () => 0,
-  next: ({ ctx }: { ctx: { turn: number } }) => {
-    const nextTurn = ctx.turn + 1
-    if (nextTurn <= 4) return nextTurn - 1
-    if (nextTurn <= 8) return 8 - nextTurn
-    return 0
+  first: ({ G }: { G?: GameState }) => G?.firstPlayer ?? 0,
+  next: ({ G }: { G?: GameState }) => {
+    const n = G?.numPlayers ?? 4
+    const f = G?.firstPlayer ?? 0
+    // setupPlacements is already incremented when endTurn fires, so it IS the
+    // 0-based index of the placement `next` is picking. Clamp so the final
+    // endTurn still yields a valid seat (endIf fires before it's used).
+    const i = Math.min(G?.setupPlacements ?? 0, 2 * n - 1)
+    return i < n ? (f + i) % n : (f + (2 * n - 1 - i)) % n
   },
 }
 
-/** Main phase: the last setup placer (player 0) takes the first turn, then clockwise. */
+/** Main phase: the last setup placer (the opening-roll winner) starts, then clockwise. */
 const mainOrder = {
   first: ({ ctx }: { ctx: { playOrderPos: number } }) => ctx.playOrderPos,
   next: ({ ctx }: { ctx: { playOrderPos: number; playOrder: string[] } }) =>
     (ctx.playOrderPos + 1) % ctx.playOrder.length,
 }
 
-export const CatanGame = {
-  name: 'catan-3d',
-  setup(_ctx: unknown, setupData: { seed?: number } | undefined): GameState {
-    const seed = setupData?.seed ?? 1
-    const board = boardFor(seed)
-    return {
-      seed,
-      robberTileId: board.desertTileId,
-      hands: [0, 1, 2, 3].map(() => emptyResourceCounts()),
-      bank: { ...BANK_START },
-      buildings: { vertices: {}, edges: {} },
-      setupPlacements: 0,
-      rolled: false,
-      lastRoll: null,
-      lastProduction: null,
-      robberStep: null,
-      pendingDiscards: {},
-      stealTargets: null,
-      pendingTrade: null,
-      devDeck: makeDevDeck(seed),
-      devHands: [0, 1, 2, 3].map(() => []),
-      devPlayedAtTurn: -1,
-      playedKnights: [0, 0, 0, 0],
-      devStep: null,
-      roadBuildingLeft: 0,
-      longestRoad: null,
-      largestArmy: null,
-      log: [],
-    }
-  },
-
-  phases: {
-    setup: {
-      start: true,
-      turn: { order: setupOrder },
-      moves: { placeSetup },
-      endIf: ({ G }: { G?: GameState }) => (G?.setupPlacements ?? 0) >= 8,
-      next: 'main',
+/**
+ * Game definition factory. `openingRoll` adds the official start (every seat
+ * throws, highest places first) as a phase before the setup draft — used by
+ * the multiplayer server. Hotseat skips it for a quick start (and so the
+ * local tests keep their deterministic player-0 start).
+ */
+function catanGameConfig({ openingRoll: withOpeningRoll }: { openingRoll: boolean }) {
+  return {
+    name: 'catan-3d' as const,
+    setup(_ctx: unknown, setupData: { seed?: number; numPlayers?: number; playerNames?: string[] } | undefined): GameState {
+      const seed = setupData?.seed ?? 1
+      const numPlayers = setupData?.numPlayers === 3 ? 3 : 4
+      const board = boardFor(seed)
+      const names = Array.from({ length: numPlayers }, (_, i) =>
+        setupData?.playerNames?.[i]?.replace(/\s+/g, ' ').trim().slice(0, 24) || PLAYER_NAMES[i],
+      )
+      return {
+        seed,
+        numPlayers,
+        robberTileId: board.desertTileId,
+        hands: Array.from({ length: numPlayers }, () => emptyResourceCounts()),
+        bank: { ...BANK_START },
+        buildings: { vertices: {}, edges: {} },
+        setupPlacements: 0,
+        openingRolls: Array.from({ length: numPlayers }, () => null),
+        firstPlayer: null,
+        rolled: false,
+        lastRoll: null,
+        lastProduction: null,
+        robberStep: null,
+        pendingDiscards: {},
+        stealTargets: null,
+        pendingTrade: null,
+        devDeck: makeDevDeck(seed),
+        devHands: Array.from({ length: numPlayers }, () => []),
+        devPlayedAtTurn: -1,
+        playedKnights: Array.from({ length: numPlayers }, () => 0),
+        devStep: null,
+        roadBuildingLeft: 0,
+        longestRoad: null,
+        largestArmy: null,
+        playerNames: names,
+        log: [],
+      }
     },
-    main: {
-      turn: {
-        order: mainOrder,
-        onBegin: ({ G }: { G?: GameState }) => {
-          if (!G) return G
-          G.rolled = false
-          G.robberStep = null
-          G.stealTargets = null
-          G.pendingDiscards = {}
-          G.pendingTrade = null
-          G.devStep = null
-          G.roadBuildingLeft = 0
-          G.devPlayedAtTurn = -1
-          return G
+
+    phases: {
+      ...(withOpeningRoll
+        ? {
+            openingRoll: {
+              start: true,
+              turn: {
+                order: {
+                  first: () => 0,
+                  next: ({ ctx }: { ctx: { playOrderPos: number; playOrder: string[] } }) =>
+                    (ctx.playOrderPos + 1) % ctx.playOrder.length,
+                },
+              },
+              moves: { openingRoll, setPlayerName },
+              endIf: ({ G }: { G?: GameState }) => G?.firstPlayer != null,
+              next: 'setup',
+            },
+          }
+        : {}),
+      setup: {
+        start: !withOpeningRoll,
+        turn: { order: setupOrder },
+        moves: { placeSetup, setPlayerName },
+        endIf: ({ G }: { G?: GameState }) => (G?.setupPlacements ?? 0) >= (G?.numPlayers ?? 4) * 2,
+        next: 'main',
+      },
+      main: {
+        turn: {
+          order: mainOrder,
+          onBegin: ({ G }: { G?: GameState }) => {
+            if (!G) return G
+            G.rolled = false
+            G.robberStep = null
+            G.stealTargets = null
+            G.pendingDiscards = {}
+            G.pendingTrade = null
+            G.lastBuild = null
+            G.devStep = null
+            G.roadBuildingLeft = 0
+            G.devPlayedAtTurn = -1
+            return G
+          },
+          stages: {
+            discard: { moves: { discardHalf } },
+            respond: { moves: { acceptTrade, declineTrade, counterTrade } },
+          },
         },
-        stages: {
-          discard: { moves: { discardHalf } },
-          respond: { moves: { acceptTrade, declineTrade } },
+        moves: {
+          roll,
+          moveRobber,
+          steal,
+          placeSettlement,
+          placeRoad,
+          upgradeCity,
+          undoBuild,
+          tradeBank,
+          proposeTrade,
+          buyDevCard,
+          playDevCard,
+          placeFreeRoad,
+          finishRoadBuilding,
+          takeYearOfPlenty,
+          endTurn,
+          setPlayerName,
         },
       },
-      moves: {
-        roll,
-        moveRobber,
-        steal,
-        placeSettlement,
-        placeRoad,
-        upgradeCity,
-        tradeBank,
-        proposeTrade,
-        buyDevCard,
-        playDevCard,
-        placeFreeRoad,
-        takeYearOfPlenty,
-        endTurn,
-      },
     },
-  },
 
-  endIf: ({ G }: { G?: GameState }) => {
-    if (!G?.hands) return undefined
-    const vps = vpCounts(G)
-    const winner = vps.findIndex((v) => v >= VICTORY_POINTS)
-    return winner >= 0 ? { winner } : undefined
-  },
+    endIf: ({ G, ctx }: { G?: GameState; ctx?: { currentPlayer?: string } }) => {
+      if (!G?.hands) return undefined
+      // official rule: you reach 10 VP on YOUR turn (awards you lose while
+      // someone else acts can never hand them the win, and vice versa)
+      const current = Number(ctx?.currentPlayer ?? '0')
+      const vps = vpCounts(G)
+      return vps[current] >= VICTORY_POINTS ? { winner: current } : undefined
+    },
+
+    playerView: ({ G, ctx, playerID }: { G?: GameState; ctx?: { gameover?: unknown }; playerID?: string | null }) => {
+      if (!G) return G
+      // game over → open the books: final hands & dev cards are revealed so the
+      // win screen shows true totals (official “reveal at the end” behavior)
+      if (ctx?.gameover) return G
+      const n = Number(playerID)
+      return maskGameState(G, playerID != null && Number.isInteger(n) && n >= 0 ? n : null)
+    },
+  }
+}
+
+/** The full online game — includes the opening-roll phase (server path). */
+export const CatanGame = catanGameConfig({ openingRoll: true })
+
+/**
+ * Multiplayer secret-state filter (PRD §7): a client only ever receives its own
+ * hand and dev cards. Other players' cards collapse to sizes (so the HUD can
+ * still show totals) and the deck order is hidden from everyone. The hotseat
+ * factory below strips playerView entirely — hotseat is open information.
+ */
+function maskGameState(G: GameState, pid: number | null): GameState {
+  return {
+    ...G,
+    hands: G.hands.map((h, i) => (i === pid ? h : emptyResourceCounts())),
+    devHands: G.devHands.map((d, i) => (i === pid ? d : [])),
+    devDeck: G.devDeck.map(() => 'victoryPoint' as DevCardType),
+    handSizes: G.hands.map(totalCards),
+    devHandSizes: G.devHands.map((d) => d.length),
+  }
 }
 
 /**
- * Local-client game factory: boardgame.io 0.50's local client doesn't forward
+ * Local hotseat factory: boardgame.io 0.50's local client doesn't forward
  * `setupData` (only the multiplayer server does), so we close over the seed.
- * The setup() above still honors setupData for the M12 server path.
+ * Hotseat skips the opening-roll phase (quick start, deterministic tests) and
+ * keeps hands open (playerView stripped).
  */
-export function createCatanGame(seed: number) {
+export function createCatanGame(seed: number, numPlayers: number = 4) {
+  const { playerView: _hiddenForMultiplayer, ...openInformation } = catanGameConfig({ openingRoll: false })
   return {
-    ...CatanGame,
+    ...openInformation,
     setup(ctx: unknown) {
-      return CatanGame.setup(ctx, { seed })
+      return CatanGame.setup(ctx, { seed, numPlayers })
     },
   }
 }

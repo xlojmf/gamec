@@ -54,6 +54,15 @@ export const RESOURCE_ICONS: Record<Resource, string> = {
   ore: '⛏',
 }
 
+/** Accent color per resource (matches the producing terrain) — port markers & legends. */
+export const RESOURCE_ACCENT: Record<Resource, number> = {
+  wood: TERRAIN_INFO.forest.accent,
+  brick: TERRAIN_INFO.hills.accent,
+  grain: TERRAIN_INFO.fields.accent,
+  wool: TERRAIN_INFO.pasture.accent,
+  ore: TERRAIN_INFO.mountains.accent,
+}
+
 /** A hand / bank / payout of resources. */
 export type ResourceCounts = Record<Resource, number>
 

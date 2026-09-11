@@ -19,11 +19,21 @@ export const MILESTONES: Milestone[] = [
   { id: 'M9', title: 'Building rules', detail: 'Costs, supply limits, connectivity, distance rule, city upgrade, legal-spot ghosts', status: 'done' },
   { id: 'M10', title: 'Trading', detail: 'Bank 4:1, ports 3:1/2:1, domestic trades with accept/decline', status: 'done' },
   { id: 'M11', title: 'Development cards', detail: 'Deck, restrictions, effects, longest road / largest army', status: 'done' },
-  { id: 'M12', title: 'Multiplayer', detail: 'boardgame.io server, rooms, hidden hands, reconnect', status: 'next' },
+  { id: 'M12', title: 'Multiplayer', detail: 'boardgame.io server, rooms, hidden hands, reconnect', status: 'done' },
+  {
+    id: 'M13',
+    title: 'Rules refinements & resilience',
+    detail:
+      'Dev cards before the roll, hotseat 3–4P, reveal on game over, win on own turn, persisted rooms/matches, stall watchdog, rematch',
+    status: 'done',
+  },
 ]
 
 export const ART_TRACK: Milestone[] = [
-  { id: 'A1', title: 'Concept & mood boards', detail: 'GPT Astra island mood, palette, lighting', status: 'next' },
-  { id: 'A2', title: 'World textures', detail: 'Tile textures ×6, water, tokens, frame', status: 'todo' },
-  { id: 'A3', title: 'UI kit', detail: 'HUD panels, buttons, icons, dice, logo', status: 'todo' },
+  { id: 'A1', title: 'Concept & mood boards', detail: 'GPT Astra island mood, palette, lighting', status: 'done' },
+  { id: 'A2', title: 'World textures', detail: 'Six terrain tops and sides, water, ivory plates, walnut frame', status: 'done' },
+  { id: 'A3', title: 'UI kit', detail: 'HUD panels, buttons, icons, dice, logo', status: 'done' },
+  { id: 'A4', title: 'Sound design', detail: 'Dice throw, build placement, robber, trade, win fanfare', status: 'done' },
+  { id: 'A5', title: 'Feel & feedback', detail: 'Placement animations, safe last-build undo, full voyage journal', status: 'done' },
+  { id: 'A6', title: 'Trade negotiation', detail: 'Counter-offers, offers to multiple players at once', status: 'done' },
 ]

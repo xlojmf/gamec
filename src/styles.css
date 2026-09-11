@@ -869,3 +869,275 @@ th:first-child {
     width: min(17.5rem, calc(100% - 1.6rem));
   }
 }
+
+/* -- online lobby (M12) -------------------------------------------------------- */
+
+.join-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.join-input {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0.14em;
+  padding: 0.5em 0.8em;
+  text-transform: uppercase;
+  width: 9ch;
+}
+.join-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.join-error {
+  color: #ff9d8a;
+  margin-top: 0.8rem;
+}
+
+.code-chip {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px dashed var(--line);
+  border-radius: 0.4rem;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0.2em;
+  padding: 0.25em 0.6em;
+}
+.code-chip:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.seat-grid {
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  margin: 0 auto 1.6rem;
+  max-width: 34rem;
+}
+.seat {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.8rem 0.9rem;
+  text-align: left;
+}
+.seat-taken {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: rgba(255, 255, 255, 0.04);
+}
+.seat-body {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+.seat-body small {
+  color: var(--muted);
+}
+.seat-you {
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  margin-left: auto;
+  text-transform: uppercase;
+}
+.hero.room .hero-sub {
+  margin-bottom: 1.4rem;
+}
+
+/* in-game multiplayer HUD bits */
+.hud-seat {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 0.8rem;
+  gap: 0.45rem;
+  margin-left: auto;
+}
+.game-connecting {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+}
+
+/* room code copy + alias (M12 polish) */
+.code-copy-hint {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  margin-left: 0.6rem;
+  padding: 0;
+  text-decoration: underline dotted;
+}
+.code-copy-hint:hover {
+  color: var(--accent);
+}
+.code-copied {
+  color: var(--accent);
+  font-weight: 600;
+  margin-left: 0.6rem;
+  text-decoration: none;
+}
+.alias-row {
+  align-items: center;
+  display: flex;
+  gap: 0.7rem;
+  justify-content: center;
+  margin: 0 auto 1.2rem;
+}
+.alias-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.alias-input {
+  letter-spacing: normal;
+  text-transform: none;
+  width: 12ch;
+}
+
+/* player-count picker + opening rolls */
+.count-picker {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin: 0 auto 1.2rem;
+}
+.count-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  min-width: 2.4rem;
+  padding: 0.35em 0.6em;
+}
+.count-chip:hover {
+  border-color: var(--accent);
+}
+.count-chip-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #10131a;
+}
+.opening-rolls .count {
+  font-weight: 700;
+  margin-left: auto;
+}
+.opening-best {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* The Island · art direction: ink, ivory, walnut and aged brass. */
+:root { --bg:#102f35; --bg-2:#173b40; --panel:rgba(247,239,218,.97); --line:rgba(213,189,140,.22); --text:#f5eedf; --muted:#b3c2be; --accent:#e5bd74; --accent-2:#9ec7b6; --radius:10px; }
+body,button,input,select { font-family:'Trebuchet MS','Segoe UI',sans-serif; }
+h1,h2,h3,.island-wordmark { font-family:'Palatino Linotype',Palatino,Georgia,serif; }
+button,a { -webkit-tap-highlight-color:transparent; }
+:focus-visible { outline:3px solid #e1ae51; outline-offset:4px; }
+button:disabled { cursor:not-allowed; }
+.btn { border-radius:7px; min-height:36px; }
+.btn-primary { background:#e5bd74; color:#24372e; border:1px solid #f3dca8; box-shadow:0 3px 0 #8d703f; }
+.btn-primary:hover { background:#f1cf8b; }
+.island-home { background:#102f35; }
+.home-nav { height:90px; display:flex; align-items:center; justify-content:space-between; padding:0 5%; border-bottom:1px solid var(--line); }
+.home-nav>div { display:flex; align-items:center; gap:32px; font-size:13px; }
+.home-nav a { color:var(--text); }
+.island-wordmark { display:flex; align-items:center; gap:12px; font-size:28px; letter-spacing:3px; }
+.island-wordmark img { width:38px; height:44px; }
+.island-wordmark small { font:9px 'Trebuchet MS',sans-serif; letter-spacing:3px; padding-left:16px; border-left:1px solid var(--line); }
+.island-hero { position:relative; min-height:740px; display:flex; align-items:center; overflow:hidden; }
+.island-hero-art { position:absolute; width:100%; height:100%; object-fit:cover; object-position:66% 50%; }
+.island-hero-shade { position:absolute; inset:0; background:linear-gradient(90deg,rgba(9,37,43,.98) 0%,rgba(9,37,43,.89) 24%,rgba(9,37,43,.15) 61%,transparent 80%); }
+.island-hero-copy { position:relative; width:560px; padding:65px 0 82px; margin-left:7%; }
+.eyebrow { color:#d8ba7d; font-size:10px; font-weight:bold; letter-spacing:2.5px; text-transform:uppercase; }
+.island-hero h1 { font-size:clamp(52px,5.7vw,84px); font-weight:400; line-height:1.04; letter-spacing:-3px; margin:28px 0; }
+.island-hero h1 em { color:#e5bd74; font-weight:400; }
+.island-hero-copy>p:not(.eyebrow):not(.home-caption) { color:#c5d0c9; font-size:16px; line-height:1.8; }
+.home-play-card { width:380px; max-width:100%; margin-top:30px; padding:22px; background:rgba(13,40,45,.83); border:1px solid rgba(224,197,146,.32); border-radius:9px; backdrop-filter:blur(8px); box-shadow:0 16px 45px #071d2540; }
+.home-play-heading { display:flex; align-items:center; justify-content:space-between; font-size:9px; letter-spacing:1.2px; color:#b7c4bd; margin-bottom:15px; gap:12px; }
+.home-play-heading>span:first-child { color:#e5bd74; }
+.home-play-card .count-picker { justify-content:flex-start; margin-bottom:18px; }
+.home-play-card .count-picker>span { margin-right:auto; font-size:13px; }
+.home-start { display:flex; justify-content:space-between; padding:13px 16px; font-size:14px; }
+.home-start span { font-size:21px; line-height:1; }
+.home-online { display:block; margin-top:18px; text-align:center; font-size:11px; color:#b9c9c1; }
+.home-online strong { color:#ead9ad; font-weight:400; }
+.home-caption { font-size:10px; color:#a6bcb5; letter-spacing:.3px; margin:16px 0 0; }
+.hero-edition { position:absolute; bottom:27px; right:5%; font-size:9px; color:#e8dbc2; letter-spacing:2px; display:flex; gap:32px; }
+.hero-edition>span { opacity:.65; }
+.home-how { background:#f2ebdb; color:#29433b; padding:66px 7%; display:grid; grid-template-columns:1.3fr repeat(3,1fr); gap:38px; }
+.home-how .eyebrow { color:#907344; }
+.home-how h2 { font-size:30px; line-height:1.25; font-weight:400; }
+.home-how a { color:#486d58; font-size:12px; }
+.home-how article { position:relative; padding:10px 0 0 28px; border-left:1px solid #d6cbb5; }
+.home-how article img { width:42px; height:42px; margin:10px 0; display:block; }
+.how-number { position:absolute; top:5px; right:0; font:26px Georgia,serif; color:#c7b898; }
+.home-how h3 { font-size:23px; margin:5px 0 10px; }
+.home-how article p { font-size:12px; line-height:1.8; color:#677267; }
+.home-footer { padding:30px 5%; display:flex; justify-content:space-between; align-items:center; gap:24px; color:#c0cabe; font-size:13px; }
+.home-footer small { max-width:470px; font-size:10px; text-align:right; opacity:.7; }
+/* The board has its own viewport, so controls never hide legal build spots. */
+.game-canvas { right:350px; width:calc(100% - 350px); }
+.game-canvas canvas { width:100%; }
+.hud-top { height:64px; padding:12px 24px; background:#102f35; border-bottom:1px solid #c2a16740; }
+.hud-brand { letter-spacing:2px; font-size:16px; }
+.hud-brand img { width:28px; height:32px; }
+.hud-panel { top:78px; right:14px; bottom:42px; width:322px; max-height:none; padding:20px; color:#2b413a; --text:#2b413a; --muted:#6b7568; --line:#8b7b5b35; --accent-2:#547d63; --bg-2:#f3ebd9; --accent:#a17532; border:1px solid #dcc9a5; box-shadow:0 12px 36px #001a2338,inset 0 0 0 4px #fff8; scrollbar-width:thin; scrollbar-color:#c9b78f transparent; }
+.hud-panel h3 { font:700 10px 'Trebuchet MS',sans-serif; letter-spacing:1.8px; margin:24px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+.hud-panel .btn { background:#fff8; color:#344b40; border-color:#c6bda8; }
+.hud-panel .btn-primary,.hud-panel .btn-active { background:#315b49; color:#fff4dc; border-color:#244434; box-shadow:0 3px 0 #193d30; }
+.hud-panel .btn:hover:not(:disabled) { background:#e5d8bd; }
+.hud-panel .btn-primary:hover:not(:disabled),.hud-panel .btn-active:hover:not(:disabled) { background:#46715a; }
+.hud-panel .hand-row { background:#fff7; border-radius:7px; padding:8px; margin-bottom:5px; border:1px solid #c4b79555; }
+.hud-panel .hand-row-active { background:#e2e9d8; border-color:#90ab83; }
+.hud-panel .hand-vp { font-weight:bold; font-size:12px; color:#486a47; }
+.hud-panel .trade-chip { border-radius:6px; background:#fff8; }
+.hud-panel .trade-chip-active { background:#dae5d2; border-color:#67886a; }
+.hud-panel .build-row { flex-wrap:wrap; }
+.hud-panel .build-row .btn { min-width:42%; min-height:58px; }
+.turn-banner { left:calc((100% - 350px)/2); top:84px; color:#f5eddb; background:#123b3de8; border-color:#d1b07470; padding:10px 18px; border-radius:8px; font-size:13px; white-space:normal; width:max-content; max-width:calc(100% - 390px); box-shadow:0 5px 20px #00232f25; }
+.hud-bottom { width:calc(100% - 350px); background:#102f35; padding:10px; font-size:10px; letter-spacing:.6px; color:#becdc5; }
+.hud-seed { font-size:10px; letter-spacing:1px; }
+.hud-details { margin-top:20px; border-top:1px solid var(--line); padding-top:14px; }
+.hud-details summary { cursor:pointer; font-size:11px; font-weight:bold; letter-spacing:.5px; }
+.log-full { max-height:240px; overflow-y:auto; margin-top:12px; padding-right:8px; }
+.resource-icon { width:19px; height:19px; object-fit:contain; display:inline-block; vertical-align:middle; }
+.overlay-card { max-height:calc(100dvh - 32px); overflow-y:auto; }
+.overlay-card .btn-primary { color:#203c32; }
+.overlay-win { border:1px solid #d5b375; padding:40px; }
+@media(max-width:1000px) { .island-hero-copy { margin-left:5%; } .home-how { gap:22px; padding:45px 5%; } .home-how h2 { font-size:24px; } }
+@media(max-width:700px) {
+ .home-nav { height:72px; } .home-nav>div { gap:12px; } .home-nav>div>.btn { display:none; } .island-wordmark { font-size:22px; } .island-wordmark small { display:none; }
+ .island-hero { min-height:780px; align-items:flex-end; } .island-hero-art { object-position:70% 0; height:420px; } .island-hero-shade { background:linear-gradient(0deg,#102f35 43%,#102f35a8 65%,transparent); } .island-hero-copy { width:90%; padding:240px 0 55px; margin:0 5%; } .island-hero h1 { font-size:53px; letter-spacing:-2px; margin:17px 0; } .island-hero-copy>p:not(.eyebrow):not(.home-caption) { font-size:14px; } .home-play-card { width:100%; } .hero-edition { display:none; }
+ .home-how { grid-template-columns:1fr; gap:24px; } .home-how article { padding-left:65px; } .home-how article img { position:absolute; left:8px; top:28px; } .home-how article p { max-width:400px; } .home-footer { display:block; } .home-footer small { display:block; text-align:left; margin-top:12px; }
+ .game-canvas { right:0; width:100%; height:55%; top:60px; } .hud-top { padding:10px; height:60px; gap:10px; } .hud-brand { font-size:12px; } .hud-seed { display:none; }
+ .hud-panel { top:calc(55% + 62px); bottom:0; left:0; right:0; width:100%; border-radius:15px 15px 0 0; max-height:none; padding:18px; }
+ .turn-banner { top:69px; left:50%; max-width:95%; font-size:11px; padding:7px 12px; } .hud-bottom { display:none; }
+}
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
+.setup-guide { padding:2px 0 16px; border-bottom:1px solid var(--line); }
+.setup-guide .eyebrow { color:#97783e; font-size:9px; margin:0; }
+.setup-guide h2 { font-size:25px; line-height:1.2; font-weight:400; margin:12px 0; }
+.setup-guide>p:not(.eyebrow) { color:#6b7568; font-size:12px; line-height:1.7; }
+.canvas-error { position:absolute; top:35%; left:10%; width:80%; text-align:center; padding:25px; background:#173b40; border:1px solid #c8aa71; z-index:2; }
+.canvas-error p { max-width:420px; margin:16px auto; }
+.rules-nav { display:flex; flex-wrap:wrap; gap:8px; margin:28px 0 35px; }
+.rules-nav a { font-size:11px; padding:7px 12px; border:1px solid var(--line); border-radius:6px; }
+.rule-section { scroll-margin-top:20px; }
+.landing:has(.join-row) { max-width:1050px; margin-top:50px; padding:45px 35px; border:1px solid #d9b97840; border-radius:18px; background:linear-gradient(100deg,#12373be8,#12373bd9),url('/assets/astra/concept/island.png') center/cover; box-shadow:0 30px 80px #001e2540; }
+.landing:has(.join-row) .hero-kicker { color:#cfb27a; }
+@media(max-width:700px) { .landing:has(.join-row) { margin:15px; padding:22px 10px; } .trade-steppers { gap:5px; } .discard-cell { flex-wrap:wrap; } .rules { padding:30px 20px; } }
+/* Game tabletop composition is maintained in game-ui.css. */

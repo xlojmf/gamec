@@ -1,0 +1,48 @@
+# Select this file as the Docker Compose location in a Git-based Coolify application.
+# Assign domains in Coolify: web -> :3000, game -> :8000 (internal target ports).
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_GAME_SERVER_URL: ${VITE_GAME_SERVER_URL:?Set the public HTTPS game origin}
+    expose:
+      - '3000'
+    restart: unless-stopped
+    depends_on:
+      game:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  game:
+    # Each service has its own build definition; Docker reuses the same cached layers.
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_GAME_SERVER_URL: ${VITE_GAME_SERVER_URL:?Set the public HTTPS game origin}
+    command: ['node', 'dist/game/gameServer.js']
+    environment:
+      PORT: '8000'
+      FLATFILE_DIR: /data
+      TURN_TIMEOUT_SECONDS: ${TURN_TIMEOUT_SECONDS:-180}
+    expose:
+      - '8000'
+    volumes:
+      - catan-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  catan-data:
