@@ -632,10 +632,23 @@ export class GameView {
     this.robberTileId = tileId
     this.refreshRobberTiles()
     if (animate) {
-      this.robberHop = { t: 0, from: this.robber.position.clone(), to: new THREE.Vector3(tile.x, TILE_TOP, tile.z) }
+      this.robberHop = { t: 0, from: this.robber.position.clone(), to: this.robberAnchor(tile) }
     } else {
-      this.robber.position.set(tile.x, TILE_TOP, tile.z)
+      this.robber.position.copy(this.robberAnchor(tile))
     }
+  }
+
+  /**
+   * Robber stand point: beside the number chit, not under it. The numeral
+   * sprite renders on top of everything (depthTest off), so a robber standing
+   * at the tile centre is invisible — offset toward the tile's outer rim
+   * (away from the island centre; centre tile falls back to camera side).
+   */
+  private robberAnchor(tile: { x: number; z: number }): THREE.Vector3 {
+    const len = Math.hypot(tile.x, tile.z)
+    const dirX = len > 0.001 ? tile.x / len : 0
+    const dirZ = len > 0.001 ? tile.z / len : 1
+    return new THREE.Vector3(tile.x + dirX * 0.42, TILE_TOP, tile.z + dirZ * 0.42)
   }
 
   /** Robber mode: highlight every tile the robber may move to and pick clicks. */
@@ -828,10 +841,11 @@ export class GameView {
       head.position.y = 0.48
       head.castShadow = true
       g.add(base, head)
+      g.scale.setScalar(1.2) // city-sized pawn — readable even among scenery
       this.robber = g
     }
     this.robberTileId = board.desertTileId
-    this.robber.position.set(desert.x, TILE_TOP, desert.z)
+    this.robber.position.copy(this.robberAnchor(desert))
     this.boardGroup.add(this.robber)
   }
 
