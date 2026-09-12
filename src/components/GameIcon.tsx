@@ -1,3 +1,5 @@
+import type { DevCardType } from '../game/catan'
+
 type IconName = 'road' | 'settlement' | 'city' | 'cards' | 'knight' | 'roadBuilding' | 'yearOfPlenty' | 'monopoly' | 'victoryPoint' | 'compass'
 
 /** A consistent engraved icon set for the tabletop controls. */
@@ -15,4 +17,26 @@ export function GameIcon({ name, className = '' }: { name: IconName; className?:
     compass: <><circle cx="12" cy="12" r="9" /><path d="m16 6-2 8-8 4 4-8zM12 1v3m0 16v3M1 12h3m16 0h3" /></>,
   }
   return <svg className={`game-icon ${className}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{shapes[name]}</svg>
+}
+
+/**
+ * The painted knight portrait (`/assets/astra/ui/knight.png`, golden figure on
+ * transparency) — used wherever a knight is shown larger than a tiny glyph
+ * (card announcements, dev-card chips) so knights get real art, not just the
+ * engraved sword icon. Sized per context via CSS (`.knight-art`).
+ */
+export function KnightArt({ className = '' }: { className?: string }) {
+  return (
+    <img
+      className={`knight-art ${className}`}
+      src="/assets/astra/ui/knight.png"
+      alt="Knight"
+      draggable={false}
+    />
+  )
+}
+
+/** Per-card icon: real knight art for the Knight, engraved SVG for the rest. */
+export function DevCardIcon({ card, className = '' }: { card: DevCardType; className?: string }) {
+  return card === 'knight' ? <KnightArt className={className} /> : <GameIcon name={card} className={className} />
 }

@@ -1,7 +1,7 @@
 import { ResourceIcon } from '#/components/ResourceIcon'
 import { GameAudioProvider, SoundToggle, Soundboard } from '#/components/GameSound'
 import { HandTray } from '#/components/HandTray'
-import { GameIcon } from '#/components/GameIcon'
+import { GameIcon, DevCardIcon } from '#/components/GameIcon'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { Client } from 'boardgame.io/client'
@@ -18,6 +18,7 @@ import {
   type PlacementState,
 } from '#/three/GameView'
 import { generateBoard } from '#/game/board'
+import { mapPresetById } from '#/game/maps'
 import { randomSeed } from '#/game/rng'
 import { isRobberRoll, type DiceRoll } from '#/game/dice'
 import {
@@ -40,7 +41,6 @@ import {
   type BgioState,
 } from '#/game/catan'
 import {
-  RESOURCE_ACCENT,
   RESOURCE_ICONS,
   RESOURCE_LABELS,
   RESOURCES,
@@ -51,9 +51,10 @@ import {
   type ResourceCounts,
 } from '#/game/terrain'
 import { gameServerHost, loadCreatorToken, loadMpSession, roomsApiBase, type MpSession } from '#/multiplayer/session'
+import { staleSyncGuard } from '#/multiplayer/transport'
 
 export const Route = createFileRoute('/game')({
-  validateSearch: (search: Record<string, unknown>): { match?: string; seat?: number; server?: string; players?: number } => {
+  validateSearch: (search: Record<string, unknown>): { match?: string; seat?: number; server?: string; players?: number; map?: string } => {
     // numbers may come back as strings after a hard refresh — coerce
     const num = (v: unknown) =>
       typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : undefined
@@ -62,6 +63,7 @@ export const Route = createFileRoute('/game')({
       seat: num(search.seat),
       server: typeof search.server === 'string' ? search.server : undefined,
       players: num(search.players),
+      map: typeof search.map === 'string' ? search.map : undefined,
     }
   },
   component: GamePage,
@@ -85,7 +87,7 @@ type BgioClient = ReturnType<typeof Client>
 
 /** Which brain GamePage owns: a local hotseat island or a server match. */
 export type ClientConfig =
-  | { kind: 'hotseat'; seed: number; numPlayers?: number }
+  | { kind: 'hotseat'; seed: number; numPlayers?: number; mapPreset?: string | null }
   | { kind: 'mp'; matchID: string; seat: number; credentials: string; server: string; numPlayers?: number }
 
 /** Owns one boardgame.io client per config — the whole game's brain. */
@@ -106,9 +108,9 @@ function useCatanClient(config: ClientConfig | null) {
             playerID: String(config.seat),
             matchID: config.matchID,
             credentials: config.credentials,
-            multiplayer: SocketIO({ server: config.server }),
+            multiplayer: staleSyncGuard(SocketIO({ server: config.server })),
           })
-        : Client({ debug: false, game: createCatanGame(config.seed, config.numPlayers ?? 4), numPlayers: config.numPlayers ?? PLAYER_COUNT })
+        : Client({ debug: false, game: createCatanGame(config.seed, config.numPlayers ?? 4, config.mapPreset), numPlayers: config.numPlayers ?? PLAYER_COUNT })
     client.start()
     clientRef.current = client
     setState(client.getState() as BgioState)
@@ -392,7 +394,7 @@ function YearOfPlentyPanel({
 }
 
 function GamePage() {
-  const { match: matchParam, server: serverParam, players: playersParam } = Route.useSearch()
+  const { match: matchParam, server: serverParam, players: playersParam, map: mapParam } = Route.useSearch()
   const [seed, setSeed] = useState(() => randomSeed())
 
   // multiplayer session (matchID + credentials in sessionStorage, PRD §7):
@@ -403,7 +405,7 @@ function GamePage() {
   }, [matchParam])
 
   const clientConfig = useMemo<ClientConfig | null>(() => {
-    if (!matchParam) return { kind: 'hotseat', seed, numPlayers: playersParam ?? 4 }
+    if (!matchParam) return { kind: 'hotseat', seed, numPlayers: playersParam ?? 4, mapPreset: mapParam ?? null }
     if (mpSession === 'pending' || !mpSession || mpSession.matchID !== matchParam) return null
     return {
       kind: 'mp',
@@ -413,13 +415,14 @@ function GamePage() {
       server: gameServerHost(),
       numPlayers: playersParam ?? 4,
     }
-  }, [matchParam, mpSession, seed, serverParam, playersParam])
+  }, [matchParam, mpSession, seed, serverParam, playersParam, mapParam])
 
   const { state, move } = useCatanClient(clientConfig)
-  // multiplayer: the board seed comes from the server state, not the URL
+  // multiplayer: the board seed comes from the server state, not the URL;
+  // fixed-map rooms carry their preset inside G
   const board = useMemo(
-    () => generateBoard(state?.G?.seed ?? (matchParam ? 0 : seed)),
-    [state?.G?.seed, matchParam, seed],
+    () => generateBoard(state?.G?.seed ?? (matchParam ? 0 : seed), state?.G?.mapPreset ?? mapParam ?? null),
+    [state?.G?.seed, state?.G?.mapPreset, matchParam, seed, mapParam],
   )
 
   // local view state (animation gating, setup selection, history)
@@ -693,11 +696,18 @@ function GamePage() {
   return (
     <GameAudioProvider
           roll={G.lastRoll?.nonce ?? null}
+          seven={G.lastRoll && isRobberRoll(G.lastRoll.sum) ? G.lastRoll.nonce : null}
+          production={
+            G.lastProduction
+              ? `${G.lastProduction.nonce}|${RESOURCES.filter(r => G.lastProduction!.gains.some(g => g[r] > 0)).join(',')}`
+              : null
+          }
           buildings={Object.keys(G.buildings.edges).length + Object.values(G.buildings.vertices).length}
           cities={Object.values(G.buildings.vertices).filter((b) => b.type === 'city').length}
           robber={G.robberTileId}
           journal={G.log[0] ?? ''}
           winner={gameover?.winner ?? null}
+          lost={gameover && seat !== null && seat !== gameover.winner ? gameover.winner : null}
           playedCard={G.lastPlayedCard ? `${G.lastPlayedCard.card}:${G.lastPlayedCard.sequence}` : undefined}
           seed={G.seed}
         >
@@ -726,7 +736,7 @@ function GamePage() {
             {mpSession && mpSession !== 'pending' && mpSession.roomCode ? ` · room ${mpSession.roomCode}` : ''}
           </span>
         ) : (
-          <span className="hud-seed">island #{G.seed.toString(36)}</span>
+          <span className="hud-seed">{G.mapPreset ? mapPresetById(G.mapPreset)?.name ?? G.mapPreset : `island #${G.seed.toString(36)}`}</span>
         )}
         {seat === null && <button className="btn btn-small table-hands-toggle" onClick={() => setShowTableHands(true)}>Table hands</button>}
         <SoundToggle />
@@ -780,7 +790,7 @@ function GamePage() {
         canPlay={phase === 'main' && myTurn && !gameover && !G.devStep && !G.robberStep && !G.pendingTrade && G.devPlayedAtTurn !== ctx.turn}
         onOpenCards={() => { setActionTab('cards'); setKind(null); requestAnimationFrame(() => document.getElementById('development-actions')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })) }}
       />
-      {G.lastPlayedCard && dismissedCard !== G.lastPlayedCard.sequence && <section className="hud played-card-announcement" aria-live="polite"><span className="eyebrow">PLAYED FOR ALL TO SEE</span><button className="card-dismiss" aria-label="Dismiss played card" onClick={() => setDismissedCard(G.lastPlayedCard!.sequence)}>×</button><div className="played-card-symbol"><GameIcon name={G.lastPlayedCard.card} /></div><h2>{DEV_CARD_INFO[G.lastPlayedCard.card].label}</h2><p>{pname(G,G.lastPlayedCard.player)} played this card</p><small>{DEV_CARD_INFO[G.lastPlayedCard.card].hint}</small></section>}
+      {G.lastPlayedCard && dismissedCard !== G.lastPlayedCard.sequence && <section className="hud played-card-announcement" aria-live="polite"><span className="eyebrow">PLAYED FOR ALL TO SEE</span><button className="card-dismiss" aria-label="Dismiss played card" onClick={() => setDismissedCard(G.lastPlayedCard!.sequence)}>×</button><div className="played-card-symbol"><DevCardIcon card={G.lastPlayedCard.card} /></div><h2>{DEV_CARD_INFO[G.lastPlayedCard.card].label}</h2><p>{pname(G,G.lastPlayedCard.player)} played this card</p><small>{DEV_CARD_INFO[G.lastPlayedCard.card].hint}</small></section>}
       <aside className="hud hud-panel" aria-label="Turn controls"><div className="action-panel-body">
         <div className="table-heading"><span className="eyebrow">THE ISLAND</span><span>First to 10 points</span></div>
         <section className="captain-card"><div><span className="chip-dot" style={{ '--chip': hex(PLAYER_COLORS[current]) } as React.CSSProperties} /><h2>{pname(G, current)}’s turn</h2><span className="captain-score">{vps[current]} <small>/ 10</small></span></div><p>{phase === 'setup' ? (setupVertex ? 'Connect your settlement with a road.' : 'Choose a glowing corner to settle.') : phase === 'openingRoll' ? 'Roll to decide who starts the adventure.' : G.devStep || G.robberStep || G.pendingTrade ? turnBanner : !myTurn ? `Waiting for ${pname(G,current)} to finish.` : !G.rolled ? 'Roll the dice to gather resources.' : 'Trade, build, then pass the dice.'}</p></section>
@@ -995,7 +1005,7 @@ function GamePage() {
                   return (
                     <div key={i} className="dev-card-row" title={info.hint}>
                       <span className="dev-card-name">
-                        <GameIcon name={entry.card} /> {info.label}
+                        <DevCardIcon card={entry.card} /> {info.label}
                         {fresh && <span className="muted small"> ·new</span>}
                       </span>
                       {entry.card === 'victoryPoint' ? (
@@ -1060,13 +1070,14 @@ function GamePage() {
         <ul className="legend">
           {harborKinds.map((kind) => (
             <li key={kind}>
-              <span
-                className="swatch"
-                style={{ background: kind === 'generic' ? '#6e7f8f' : hex(RESOURCE_ACCENT[kind]) }}
-              />
+              {kind === 'generic' ? (
+                <span className="swatch" style={{ background: '#6e7f8f' }} />
+              ) : (
+                <ResourceIcon resource={kind} />
+              )}
               {kind === 'generic'
                 ? '3:1 · any resource'
-                : `2:1 · ${RESOURCE_LABELS[kind]} ${RESOURCE_ICONS[kind]}`}
+                : `2:1 · ${RESOURCE_LABELS[kind]}`}
             </li>
           ))}
         </ul>
@@ -1107,14 +1118,23 @@ function GamePage() {
             <p>{pname(G, pt.proposer)} offers {responders.map(p => pname(G, p)).join(', ')}</p>
             <p className="trade-terms">{countsLabel(pt.give)} <span className="trade-swap">⇄</span> {countsLabel(pt.take)}</p>
             {responders.length > 1 && <p className="muted small">The first acceptance completes the trade. A counter replaces this offer.</p>}
-            {eligible.map(p => <section key={p}>
-              <p className="small">{pname(G, p)} receives {countsLabel(pt.give)} and gives {countsLabel(pt.take)}</p>
-              <div className="overlay-actions">
-                <button className="btn" onClick={() => move(p, m => m.declineTrade())}>Decline</button>
-                <button className="btn" onClick={() => setCounterSeat(p)}>Counter</button>
-                <button className="btn btn-primary" onClick={() => move(p, m => m.acceptTrade())}>Accept</button>
-              </div>
-            </section>)}
+            {eligible.map(p => {
+              // The offer is shown to every recipient even if they can't cover it —
+              // refusing (or countering) must stay possible so nobody learns
+              // that a player lacks a resource from the offer not arriving.
+              const short = RESOURCES.some(r => pt.take[r] > G.hands[p][r])
+              return (
+                <section key={p}>
+                  <p className="small">{pname(G, p)} receives {countsLabel(pt.give)} and gives {countsLabel(pt.take)}</p>
+                  {short && <p className="small trade-warn">{pname(G, p)} doesn't hold enough cards for this offer — decline or counter</p>}
+                  <div className="overlay-actions">
+                    <button className="btn" onClick={() => move(p, m => m.declineTrade())}>Decline</button>
+                    <button className="btn" onClick={() => setCounterSeat(p)}>Counter</button>
+                    <button className="btn btn-primary" disabled={short} onClick={() => move(p, m => m.acceptTrade())}>Accept</button>
+                  </div>
+                </section>
+              )
+            })}
             {!eligible.length && <p className="muted small">Waiting for a response…</p>}
           </div></div>
         )

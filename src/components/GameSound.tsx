@@ -1,28 +1,89 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { GameIcon } from './GameIcon'
+import { GameIcon, KnightArt } from './GameIcon'
 
 export const CUES = {
+  // -- automatic table events --------------------------------------------------
   intro: { label: 'Imperial march', file: 'imperial_march.mp3' },
-  knight: { label: 'Knight', file: 'knight_moat3.mp3' },
+  knight: { label: 'Knight (moat)', file: 'knight_moat3.mp3' },
+  knightGold: { label: 'Knight (no gold)', file: 'knightnogold1.mp3' },
   city: { label: 'City build', file: 'starship-1.mp3' },
-  build: { label: 'Construction', file: 'warcraft-ii-sound-effects-orc-peon-grunt_-_work-complete.mp3' },
+  build: { label: 'Work complete', file: 'warcraft-ii-sound-effects-orc-peon-grunt_-_work-complete.mp3' },
   dice: { label: 'Dice roll', file: 'shake-and-roll-dice-soundbible.mp3' },
+  pegaLadrao: { label: 'Pega ladrão!', file: 'pega-ladrao.mp3' },
+  madruga: { label: 'Seu Madruga — ladrão', file: 'seu-madruga-ladrao.mp3' },
+  robber: { label: 'Robber moves', file: 'thief.mp3' },
+  saw: { label: 'I want to play a game', file: 'saw-i-want-to-play-a-game.mp3' },
+  wood: { label: 'Lumberjack', file: 'lumberjack-clash-royale.mp3' },
+  wool: { label: 'Sheep', file: 'minecraft-sheep2.mp3' },
+  grain: { label: 'Cereal', file: 'cereal.mp3' },
   trade: { label: 'Fair trade', file: 'fair-trade.mp3' },
-  robber: { label: 'Robber', file: 'thief.mp3' },
+  takeTrade: { label: 'Take the trade', file: 'takethetrade.mp3' },
+  obrigado: { label: 'Obrigado, amigo', file: 'obrigado-amigo-voce-e-um-amigo.mp3' },
+  rickroll: { label: 'Monopoly roll', file: 'rickroll.mp3' },
   win: { label: 'Victory', file: 'super-mario-beedoo_F3cwLoe.mp3' },
+  funeral: { label: 'Undertaker’s bell', file: 'undertakers-bell_2UwFCIe.mp3' },
+  // -- manual table cues (soundboard) -----------------------------------------
+  golo: { label: 'GOLO!', file: 'this-girl-kungs-golo-fc-porto-button-1.mp3' },
+  funeralMarch: { label: 'Funeral march', file: 'toque-militar-funebre.mp3' },
+  peonWork: { label: 'Peon — work work', file: 'wc3-peon-says-work-work-only-.mp3' },
+  peonReady: { label: 'Peon — ready to work', file: 'warcraft-peon-ready-to-work.mp3' },
+  yesLord: { label: 'Yes, me lord', file: 'yes-me-lord-warcraft-ii.mp3' },
+  peasantYes: { label: 'Peasant — yes', file: 'peasant-yes-warcraft-ii.mp3' },
+  whatIsIt: { label: 'What is it?', file: 'what-is-it-warcraft-ii.mp3' },
+  bomb: { label: 'Bomb defused', file: 'bomb-has-been-defused-csgo-sound-effect.mp3' },
+  trains: { label: 'CP Comboios', file: 'cp-comboios-de-portugal-anuncio.mp3' },
+  movemind: { label: 'Move a mente', file: 'movemind-o-crl.mp3' },
+  vaiMaze: { label: 'Vai mãezinha', file: 'vai-maze-po-crl-pa.mp3' },
 } as const
 type Cue = keyof typeof CUES
-interface SoundEvents { roll: number | null; buildings: number; cities: number; robber: string; journal: string; winner: number | null; playedCard?: string; seed?: number }
+export interface SoundEvents {
+  roll: number | null
+  /** roll nonce when the sum was 7 (robber strikes). */
+  seven: number | null
+  /** `${nonce}|${produced resources}` marker — fires production cues. */
+  production: string | null
+  buildings: number
+  cities: number
+  robber: string
+  journal: string
+  winner: number | null
+  /** the winning seat when it is NOT the local player (multiplayer loss). */
+  lost: number | null
+  playedCard?: string
+  seed?: number
+}
+
+/** Alternating knight voice per played card (deterministic — testable). */
+const knightVariant = (playedCard: string): Cue =>
+  Number(playedCard.split(':')[1] ?? 0) % 2 === 0 ? 'knightGold' : 'knight'
+/** Rotating trade acceptance line per journal entry (deterministic). */
+const tradeVariant = (journal: string): Cue =>
+  (['trade', 'takeTrade', 'obrigado'] as const)[journal.length % 3]
 
 export function eventCue(old: SoundEvents, next: SoundEvents): Cue | null {
   if (next.seed !== old.seed) return 'intro'
-  if (next.winner !== null && next.winner !== old.winner) return 'win'
-  if (next.playedCard !== old.playedCard && next.playedCard?.startsWith('knight:')) return 'knight'
+  if (next.winner !== null && next.winner !== old.winner) return next.lost === next.winner ? 'funeral' : 'win'
+  if (next.playedCard !== old.playedCard) {
+    if (next.playedCard?.startsWith('knight:')) return knightVariant(next.playedCard)
+    if (next.playedCard?.startsWith('monopoly:')) return 'rickroll'
+  }
+  if (next.seven !== null && next.seven !== old.seven) return 'pegaLadrao'
+  // resource-specific production beats the generic dice rattle
+  if (next.production !== old.production && next.production) {
+    const produced = next.production.split('|')[1] ?? ''
+    if (produced.includes('wool')) return 'wool'
+    if (produced.includes('wood')) return 'wood'
+    if (produced.includes('grain')) return 'grain'
+  }
   if (next.cities > old.cities) return 'city'
   if (next.buildings > old.buildings) return 'build'
   if (next.roll !== old.roll && next.roll !== null) return 'dice'
+  if (next.journal !== old.journal) {
+    if (/stole/.test(next.journal)) return 'madruga'
+    if (/discard/i.test(next.journal)) return 'saw'
+    if (/accepted|traded/.test(next.journal)) return tradeVariant(next.journal)
+  }
   if (next.robber !== old.robber) return 'robber'
-  if (next.journal !== old.journal && /accepted|traded/.test(next.journal)) return 'trade'
   return null
 }
 
@@ -97,7 +158,7 @@ export function GameAudioProvider({ children, ...events }: SoundEvents & { child
     const cue = eventCue(previous.current, events)
     previous.current = events
     if (cue && enabledRef.current) play(cue, cue === 'intro')
-  }, [events.roll, events.buildings, events.cities, events.robber, events.journal, events.winner, events.playedCard, events.seed, play])
+  }, [events.roll, events.seven, events.production, events.buildings, events.cities, events.robber, events.journal, events.winner, events.lost, events.playedCard, events.seed, play])
 
   const toggle = () => {
     enabledRef.current = !enabledRef.current
@@ -121,7 +182,7 @@ export function Soundboard() {
     <div className="soundboard-transport"><button className="sound-play" aria-label={sound.playing ? 'Stop audio' : 'Play ' + CUES[sound.selected].label} onClick={() => sound.playing ? sound.stop() : sound.play(sound.selected)}>{sound.playing ? '■' : '▶'}</button>
       <label><span className="sr-only">Choose a table sound</span><select value={sound.selected} onChange={event => { sound.stop(); sound.select(event.target.value as Cue) }}>{Object.entries(CUES).map(([cue, info]) => <option key={cue} value={cue}>{info.label}</option>)}</select></label>
     </div>
-    <div className="soundboard-grid">{(['intro', 'knight', 'city'] as Cue[]).map(cue => <button key={cue} className="soundboard-button" title={'Play ' + CUES[cue].label} onClick={() => sound.play(cue)}>{cue === 'intro' ? <span aria-hidden="true">♫</span> : <GameIcon name={cue === 'knight' ? 'knight' : 'city'} />}{cue === 'intro' ? 'March' : cue === 'city' ? 'City' : 'Knight'}</button>)}</div>
+    <div className="soundboard-grid">{(['intro', 'knight', 'dice', 'robber', 'city'] as Cue[]).map(cue => <button key={cue} className="soundboard-button" title={'Play ' + CUES[cue].label} onClick={() => sound.play(cue)}>{cue === 'intro' ? <span aria-hidden="true">♫</span> : cue === 'dice' ? <span aria-hidden="true">🎲</span> : cue === 'knight' || cue === 'robber' ? <KnightArt /> : <GameIcon name="city" />}{CUES[cue].label}</button>)}</div>
     <label className="sound-volume"><span>Volume</span><input aria-label="Sound volume" type="range" min="0" max="1" step="0.05" value={sound.volume} onChange={event => sound.setVolume(Number(event.target.value))} /></label>
   </section>
 }

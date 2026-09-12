@@ -336,3 +336,61 @@ describe('rematch & stall watchdog', () => {
     expect(room.players.every((p) => !p.name)).toBe(true)
   })
 })
+
+describe('fixed map rooms', () => {
+  it('creates a room on a preset island and syncs it to clients', async () => {
+    const created = (await (
+      await fetch(`${BASE}/rooms`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ numPlayers: 3, map: 'cwc2025-2' }),
+      })
+    ).json()) as { code: string; matchID: string; mapPreset: string | null }
+    expect(created.mapPreset).toBe('cwc2025-2')
+
+    const room = (await (await fetch(`${BASE}/rooms/${created.code}`)).json()) as {
+      mapPreset?: string | null
+      players: Array<{ id: number }>
+    }
+    expect(room.mapPreset).toBe('cwc2025-2')
+    expect(room.players).toHaveLength(3)
+
+    const joined = (await (
+      await fetch(`${BASE}/rooms/${created.code}/join`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ playerID: '0', playerName: 'Mapper' }),
+      })
+    ).json()) as { playerCredentials: string }
+
+    const client = Client({
+      game: CatanGame,
+      numPlayers: 3,
+      playerID: '0',
+      credentials: joined.playerCredentials,
+      matchID: created.matchID,
+      multiplayer: SocketIO({ server: `127.0.0.1:${PORT}` }),
+    })
+    client.start()
+    clients.push(client)
+    expect(await waitFor(() => G(client)?.seed !== undefined)).toBe(true)
+    expect(G(client)!.mapPreset).toBe('cwc2025-2')
+    // the island matches the preset terrain exactly (via the shared module)
+    const { MAP_PRESETS } = await import('#/game/maps')
+    const { boardFor } = await import('#/game/catan')
+    const preset = MAP_PRESETS.find((m) => m.id === 'cwc2025-2')!
+    const board = boardFor(G(client)!.seed, G(client)!.mapPreset)
+    for (const tile of board.tiles) expect(tile.terrain).toBe(preset.tiles[tile.id])
+  }, 12000)
+
+  it('rejects unknown map ids by falling back to a random island', async () => {
+    const created = (await (
+      await fetch(`${BASE}/rooms`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ map: 'not-a-map' }),
+      })
+    ).json()) as { mapPreset: string | null }
+    expect(created.mapPreset).toBeNull()
+  })
+})

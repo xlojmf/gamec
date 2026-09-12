@@ -83,3 +83,52 @@ describe('generateBoard', () => {
     }
   })
 })
+
+// -- fixed map presets ----------------------------------------------------------
+
+import { MAP_PRESETS } from './maps'
+
+describe('generateBoard with a fixed preset', () => {
+  it('places the preset terrain verbatim (any seed)', () => {
+    for (const preset of MAP_PRESETS) {
+      const board = generateBoard(42, preset.id)
+      for (const tile of board.tiles) {
+        expect(tile.terrain).toBe(preset.tiles[tile.id])
+      }
+      expect(board.desertTileId).toBeTruthy()
+      expect(board.tileById.get(board.desertTileId)!.terrain).toBe('desert')
+    }
+  })
+
+  it('follows the official A–R chit spiral, skipping the desert', () => {
+    const SPIRAL = [5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 9, 5, 10, 11, 6, 3, 8, 4]
+    for (const preset of MAP_PRESETS) {
+      const board = generateBoard(7, preset.id)
+      const producing = board.tiles.filter((t) => t.terrain !== 'desert')
+      expect(producing).toHaveLength(18)
+      // the multiset of numbers is exactly the official sequence
+      const numbers = producing.map((t) => t.numberToken).sort((a, b) => a! - b!)
+      expect(numbers).toEqual([...SPIRAL].sort((a, b) => a - b))
+      // desert has no token
+      expect(board.tileById.get(board.desertTileId)!.numberToken).toBeNull()
+      // NOTE: adjacent 6/8 can legitimately appear on fixed islands — the
+      // no-adjacent-red guideline governs the variable (random) setup only,
+      // and some official maps (e.g. CWC 2025 #1/#3) break it by design.
+    }
+  })
+
+  it('is deterministic for a given seed + preset, and differs between presets', () => {
+    const a = generateBoard(99, 'cwc2025-1')
+    const b = generateBoard(99, 'cwc2025-1')
+    expect(a.tiles.map((t) => [t.id, t.terrain, t.numberToken])).toEqual(
+      b.tiles.map((t) => [t.id, t.terrain, t.numberToken]),
+    )
+    const c = generateBoard(99, 'cwc2025-2')
+    expect(a.tiles.map((t) => t.terrain)).not.toEqual(c.tiles.map((t) => t.terrain))
+  })
+
+  it('unknown preset ids fall back to a random island', () => {
+    const board = generateBoard(5, 'does-not-exist')
+    expect(board.tiles).toHaveLength(19)
+  })
+})

@@ -59,6 +59,7 @@ export interface RoomInfo {
   code: string
   matchID: string
   started?: boolean
+  mapPreset?: string | null
   players: RoomPlayers[]
 }
 

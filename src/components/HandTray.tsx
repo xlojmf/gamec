@@ -1,7 +1,7 @@
 import { DEV_CARD_INFO, type DevCardEntry, type DevCardType } from '../game/catan'
 import { RESOURCES, RESOURCE_LABELS, totalCards, type ResourceCounts } from '../game/terrain'
 import { ResourceIcon } from './ResourceIcon'
-import { GameIcon } from './GameIcon'
+import { GameIcon, DevCardIcon } from './GameIcon'
 
 interface HandTrayProps {
   name: string
@@ -25,7 +25,7 @@ export function HandTray({ name, hand, cards, turn, canPlay, onOpenCards }: Hand
       </div>)}</div>
       <div className="development-cards" aria-label="Your development cards">
         {kinds.length ? kinds.map(kind => <button className="development-card" key={kind} onClick={onOpenCards} title={`${DEV_CARD_INFO[kind].label}: ${DEV_CARD_INFO[kind].hint}. ${status(kind)}`}>
-          <GameIcon name={kind} /><strong>{DEV_CARD_INFO[kind].label}</strong>
+          <DevCardIcon card={kind} /><strong>{DEV_CARD_INFO[kind].label}</strong>
           <span className="dev-count">×{cards.filter(entry => entry.card === kind).length}</span><small>{status(kind)}</small>
         </button>) : <div className="development-empty"><GameIcon name="cards" /><div><strong>Development cards</strong><span>Your cards will appear here</span></div></div>}
       </div>

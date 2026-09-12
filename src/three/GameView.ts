@@ -145,6 +145,9 @@ const propGeo = {
   dune: new THREE.SphereGeometry(0.17, 10, 8),
   robberBase: new THREE.CylinderGeometry(0.09, 0.13, 0.42, 10),
   robberHead: new THREE.SphereGeometry(0.1, 10, 8),
+  robberPlinth: new THREE.CylinderGeometry(0.12, 0.15, 0.04, 12),
+  /** Golden knight standee cutout (public/assets/astra/ui/knight.png, 324×720). */
+  knightStandee: new THREE.PlaneGeometry(0.42, 0.9),
 }
 const propMat = {
   trunk: new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 1 }),
@@ -154,6 +157,22 @@ const propMat = {
   rock: new THREE.MeshStandardMaterial({ color: 0xa0a18e, roughness: 0.98, flatShading: true }),
   dune: new THREE.MeshStandardMaterial({ color: 0xd8c58e, roughness: 1 }),
   robber: new THREE.MeshStandardMaterial({ color: 0x23252d, roughness: 0.5, metalness: 0.25 }),
+}
+
+/** The painted knight art as a standee texture — loaded once, optional. */
+let knightStandeeTexture: Promise<THREE.Texture | null> | null = null
+function loadKnightStandeeTexture(): Promise<THREE.Texture | null> {
+  if (!knightStandeeTexture) {
+    knightStandeeTexture = new THREE.TextureLoader()
+      .loadAsync('/assets/astra/ui/knight.png')
+      .then((texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace
+        texture.anisotropy = 8
+        return texture
+      })
+      .catch(() => null) // art is optional — the dark pawn stays as fallback
+  }
+  return knightStandeeTexture
 }
 
 // --- building geometry cache ------------------------------------------------
@@ -202,15 +221,16 @@ function tokenTexture(n: number): THREE.CanvasTexture {
 }
 
 // --- harbor / port markers ----------------------------------------------------
-// Each port renders as a wooden dock with a sign: "2:1" + resource color/icon
-// for special harbors, "3:1 ?" for generic ones. All textures/materials are
-// cached per kind (6 variants total, shared by every board).
+// Each port renders as a wooden dock with an ivory medallion: "2:1" plus the
+// traded resource's ICON for special harbors (no written label — legible at
+// a glance), "3:1 ANY" for generic ones. All textures/materials are cached
+// per kind (6 variants total, shared by every board).
 
 const portGeo = {
   dock: new THREE.BoxGeometry(0.85, 0.07, 0.34),
   mooring: new THREE.CylinderGeometry(0.035, 0.04, 0.22, 8),
   signPost: new THREE.CylinderGeometry(0.026, 0.032, 0.52, 8),
-  sign: new THREE.CircleGeometry(0.24, 48),
+  sign: new THREE.CircleGeometry(0.28, 48),
   plank: new THREE.BoxGeometry(0.085, 0.025, 0.36),
   hull: new THREE.SphereGeometry(1, 12, 8),
 }
@@ -219,38 +239,64 @@ const portMat = {
   woodDark: new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 0.9 }),
 }
 
+/** Loaded-and-sized copies of the UI resource SVGs (shared by port signs). */
+const resourceIconImageCache = new Map<Resource, HTMLImageElement>()
+async function resourceIconImage(resource: Resource): Promise<HTMLImageElement> {
+  const cached = resourceIconImageCache.get(resource)
+  if (cached) return cached
+  // the shipped SVGs carry only a viewBox — give them explicit intrinsic
+  // dimensions so canvas drawImage scales them predictably everywhere
+  const svg = await (await fetch(`/assets/astra/ui/${resource}.svg`)).text()
+  const img = new Image()
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg.replace('<svg ', '<svg width="112" height="112" '))
+  await img.decode()
+  resourceIconImageCache.set(resource, img)
+  return img
+}
+
 const portSignMaterialCache = new Map<PortKind, THREE.MeshStandardMaterial>()
 function portSignMaterial(kind: PortKind): THREE.MeshStandardMaterial {
   let mat = portSignMaterialCache.get(kind)
   if (mat) return mat
   const canvas = document.createElement('canvas')
-  canvas.width = canvas.height = 256
+  canvas.width = canvas.height = 384
   const ctx = canvas.getContext('2d')!
-  const bg = '#f3e3bc'
-  // rounded background plate
-  const r = 34
+  const ink = '#2f463f'
+  // rounded ivory background plate
+  const r = 52
   ctx.beginPath()
-  ctx.moveTo(r, 8)
-  ctx.arcTo(248, 8, 248, 248, r)
-  ctx.arcTo(248, 248, 8, 248, r)
-  ctx.arcTo(8, 248, 8, 8, r)
-  ctx.arcTo(8, 8, 248, 8, r)
+  ctx.moveTo(r, 12)
+  ctx.arcTo(372, 12, 372, 372, r)
+  ctx.arcTo(372, 372, 12, 372, r)
+  ctx.arcTo(12, 372, 12, 12, r)
+  ctx.arcTo(12, 12, 372, 12, r)
   ctx.closePath()
-  ctx.fillStyle = bg
+  ctx.fillStyle = '#f3e3bc'
   ctx.fill()
-  ctx.lineWidth = 10
+  ctx.lineWidth = 14
   ctx.strokeStyle = '#b18a4d'
   ctx.stroke()
   // ratio
-  ctx.fillStyle = '#314b42'
+  ctx.fillStyle = ink
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.font = 'bold 92px Georgia, serif'
-  ctx.fillText(kind === 'generic' ? '3:1' : '2:1', 128, 92)
-  ctx.font = 'bold 30px Georgia, serif'
-  ctx.fillText(kind === 'generic' ? 'ANY' : RESOURCE_LABELS[kind].toUpperCase(), 128, 178)
+  ctx.font = 'bold 104px Georgia, serif'
+  ctx.fillText(kind === 'generic' ? '3:1' : '2:1', 192, kind === 'generic' ? 168 : 106)
+  if (kind === 'generic') {
+    ctx.font = 'bold 56px Georgia, serif'
+    ctx.fillText('ANY', 192, 268)
+  } else {
+    // 2:1 harbors show the traded resource's icon — legible at a glance
+    // instead of a written label. Drawn once the SVG loads, then the
+    // texture refreshes in place.
+    const resource = kind
+    void resourceIconImage(resource).then((img) => {
+      ctx.drawImage(img, 102, 148, 180, 180)
+      mat!.map!.needsUpdate = true
+    })
+  }
   const tex = new THREE.CanvasTexture(canvas)
-  tex.anisotropy = 4
+  tex.anisotropy = 8
   tex.colorSpace = THREE.SRGBColorSpace
   mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 })
   portSignMaterialCache.set(kind, mat)
@@ -834,14 +880,46 @@ export class GameView {
     const desert = board.tileById.get(board.desertTileId)!
     if (!this.robber) {
       const g = new THREE.Group()
+      // dark plinth grounds the piece and carries its shadow
+      const plinth = new THREE.Mesh(propGeo.robberPlinth, propMat.robber)
+      plinth.position.y = 0.02
+      plinth.castShadow = true
+      g.add(plinth)
+      // the golden knight standee — the board's robber piece. Until (unless)
+      // the art loads, the classic dark pawn stands in as fallback.
+      const pawn = new THREE.Group()
       const base = new THREE.Mesh(propGeo.robberBase, propMat.robber)
-      base.position.y = 0.21
+      base.position.y = 0.04 + 0.21
       base.castShadow = true
       const head = new THREE.Mesh(propGeo.robberHead, propMat.robber)
-      head.position.y = 0.48
+      head.position.y = 0.04 + 0.48
       head.castShadow = true
-      g.add(base, head)
-      g.scale.setScalar(1.2) // city-sized pawn — readable even among scenery
+      pawn.add(base, head)
+      g.add(pawn)
+      const standeeMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        roughness: 0.55,
+        metalness: 0.1,
+        transparent: true,
+        alphaTest: 0.06,
+        side: THREE.DoubleSide,
+        emissive: 0xf2c14e,
+        emissiveIntensity: 0.32,
+      })
+      const standee = new THREE.Mesh(propGeo.knightStandee, standeeMat)
+      standee.position.y = 0.04 + 0.45
+      standee.visible = false
+      g.add(standee)
+      this.disposables.push(standeeMat)
+      void loadKnightStandeeTexture().then((texture) => {
+        if (!texture) return
+        standeeMat.map = texture
+        standeeMat.emissiveMap = texture
+        standeeMat.needsUpdate = true
+        standee.visible = true
+        pawn.visible = false
+      })
+      g.scale.setScalar(1.15) // readable even among scenery
       this.robber = g
     }
     this.robberTileId = board.desertTileId
@@ -1303,6 +1381,12 @@ export class GameView {
         this.robberHop = null
         this.robber.rotation.y = 0
       }
+    } else if (this.robber) {
+      // standee: turn to face the camera (yaw only) like a tabletop cutout
+      this.robber.rotation.y = Math.atan2(
+        this.camera.position.x - this.robber.position.x,
+        this.camera.position.z - this.robber.position.z,
+      )
     }
     if (this.robberTilesGroup.visible) {
       const base = ROBBER_TILE_BASE_OPACITY + 0.05 + 0.05 * Math.sin(t * 5)

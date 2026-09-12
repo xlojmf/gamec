@@ -106,6 +106,8 @@ export interface LastProduction {
 
 export interface GameState {
   seed: number
+  /** Fixed map preset id (src/game/maps.ts) — null/undefined = random island. */
+  mapPreset?: string | null
   /** Room size (3 or 4) — sizes hands + the setup draft snake. */
   numPlayers: number
   robberTileId: string
@@ -204,14 +206,15 @@ const INVALID = INVALID_MOVE // 'INVALID_MOVE' string in boardgame.io 0.50
 
 // -- helpers ------------------------------------------------------------------
 
-const boardCache = new Map<number, Board>()
+const boardCache = new Map<string, Board>()
 
 /** Regenerate (and cache) the island from its seed — identical everywhere. */
-export function boardFor(seed: number): Board {
-  let board = boardCache.get(seed)
+export function boardFor(seed: number, mapPreset?: string | null): Board {
+  const key = `${seed}|${mapPreset ?? ''}`
+  let board = boardCache.get(key)
   if (!board) {
-    board = generateBoard(seed)
-    boardCache.set(seed, board)
+    board = generateBoard(seed, mapPreset)
+    boardCache.set(key, board)
   }
   return board
 }
@@ -294,7 +297,7 @@ export function countsLabel(counts: Partial<ResourceCounts>): string {
  * 3 via any generic port, else 4 — ports need an own building on a corner.
  */
 export function bankTradeRate(G: GameState, player: number, resource: Resource): 2 | 3 | 4 {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const owns = (vids: readonly string[]) =>
     vids.some((vid) => G.buildings.vertices[vid]?.player === player)
   for (const p of board.ports) {
@@ -318,7 +321,7 @@ function respectsDistance(G: GameState, board: Board, vertexId: VertexId): boole
 
 /** Empty + distance rule (no building on an adjacent junction). */
 export function validSetupVertices(G: GameState): VertexId[] {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const out: VertexId[] = []
   for (const v of board.vertices) {
     if (G.buildings.vertices[v.id]) continue
@@ -329,7 +332,7 @@ export function validSetupVertices(G: GameState): VertexId[] {
 
 /** Empty road spots touching the just-placed setup settlement. */
 export function validSetupEdges(G: GameState, vertexId: VertexId): EdgeId[] {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const v = board.vertexById.get(vertexId)
   if (!v) return []
   return v.edgeIds.filter((eid) => !G.buildings.edges[eid])
@@ -351,7 +354,7 @@ function connectsThrough(G: GameState, board: Board, vertexId: VertexId, player:
 /** Fully legal road spots: empty, connected, supply remaining (no cost —
  *  also the Road Building effect's placement rule). */
 export function connectedRoadEdges(G: GameState, player: number): EdgeId[] {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   if (pieceCounts(G, player).road >= SUPPLY_LIMITS.road) return []
   const out: EdgeId[] = []
   for (const e of board.edges) {
@@ -369,7 +372,7 @@ export function validRoadEdges(G: GameState, player: number): EdgeId[] {
 
 /** Fully legal settlement spots: empty, distance rule, own road, affordable, supply. */
 export function validSettlementVertices(G: GameState, player: number): VertexId[] {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   if (pieceCounts(G, player).settlement >= SUPPLY_LIMITS.settlement) return []
   if (!canAfford(G.hands[player], BUILD_COSTS.settlement)) return []
   const out: VertexId[] = []
@@ -392,7 +395,7 @@ export function validCityVertices(G: GameState, player: number): VertexId[] {
 
 /** Players (≠ mover) with a building next to the robber's tile and ≥1 card. */
 export function robberVictims(G: GameState, tileId: string, mover: number): number[] {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const tile = board.tileById.get(tileId)
   if (!tile) return []
   const owners = new Set<number>()
@@ -410,7 +413,7 @@ function pushLog(G: GameState, text: string) {
 
 /** Apply production for a roll, updating hands + bank (PRD §5.3.1). */
 function applyProduction(G: GameState, sum: number, turn: number) {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const vertices = new Map(Object.entries(G.buildings.vertices))
   const result = computeProduction(board, vertices, G.robberTileId, sum, G.bank, G.hands.length)
   G.hands = G.hands.map((hand, i) => {
@@ -462,7 +465,7 @@ function doSteal(G: GameState, victim: number, thief: number, die: (n: number) =
 
 /** Recompute Longest Road / Largest Army after board- or knight-changing moves. */
 function updateAwards(G: GameState) {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const lengths = G.hands.map((_, p) => longestRoadLength(G.buildings, board, p))
   G.longestRoad = claimAward(G.longestRoad, lengths, LONGEST_ROAD_MIN)
   G.largestArmy = claimAward(G.largestArmy, G.playedKnights, LARGEST_ARMY_MIN)
@@ -470,7 +473,7 @@ function updateAwards(G: GameState) {
 
 /** Second-round setup settlements collect 1 card per adjacent producing hex. */
 function grantSetupResources(G: GameState, player: number, vertexId: VertexId) {
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const v = board.vertexById.get(vertexId)
   if (!v) return
   for (const tileId of v.tileIds) {
@@ -524,7 +527,7 @@ function openingRoll({ G, ctx, playerID, random, events }: MoveArgs) {
 function placeSetup({ G, ctx, events }: MoveArgs, vertexId: VertexId, edgeId: EdgeId) {
   if (!G) return INVALID
   const player = Number(ctx.currentPlayer)
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   const vertex = board.vertexById.get(vertexId)
   const edge = board.edgeById.get(edgeId)
   if (!vertex || !edge) return INVALID
@@ -593,7 +596,7 @@ function moveRobber({ G, ctx, random }: MoveArgs, tileId: string) {
   if (!G) return INVALID
   if (G.robberStep !== 'move') return INVALID
   if (tileId === G.robberTileId) return INVALID
-  const board = boardFor(G.seed)
+  const board = boardFor(G.seed, G.mapPreset)
   if (!board.tileById.has(tileId)) return INVALID
 
   G.robberTileId = tileId
@@ -862,8 +865,12 @@ function proposeTrade(
     takeTotal += t
   }
   if (giveTotal < 1 || takeTotal < 1) return INVALID
-  partners = partners.filter(p => RESOURCES.every(r => normTake[r] <= G.hands[p][r]))
-  if (!partners.length) return INVALID
+  // NOTE: recipients are deliberately NOT filtered by whether they can cover
+  // `take` — every selected partner must SEE the offer (they can decline or
+  // counter) so nobody can infer that a player lacks a resource from the
+  // offer never reaching them. acceptTrade re-validates both hands at
+  // acceptance time. This also keeps client-side validation consistent in
+  // multiplayer, where other players' hands are masked to zeros by playerView.
 
   G.pendingTrade = { proposer, partner: partners[0], give: normGive, take: normTake, ...(partners.length > 1 ? {partners} : {}) }
   pushLog(
@@ -980,15 +987,17 @@ const mainOrder = {
 function catanGameConfig({ openingRoll: withOpeningRoll }: { openingRoll: boolean }) {
   return {
     name: 'catan-3d' as const,
-    setup(_ctx: unknown, setupData: { seed?: number; numPlayers?: number; playerNames?: string[] } | undefined): GameState {
+    setup(_ctx: unknown, setupData: { seed?: number; numPlayers?: number; playerNames?: string[]; mapPreset?: string | null } | undefined): GameState {
       const seed = setupData?.seed ?? 1
+      const mapPreset = setupData?.mapPreset ?? null
       const numPlayers = setupData?.numPlayers === 3 ? 3 : 4
-      const board = boardFor(seed)
+      const board = boardFor(seed, mapPreset)
       const names = Array.from({ length: numPlayers }, (_, i) =>
         setupData?.playerNames?.[i]?.replace(/\s+/g, ' ').trim().slice(0, 24) || PLAYER_NAMES[i],
       )
       return {
         seed,
+        mapPreset,
         numPlayers,
         robberTileId: board.desertTileId,
         hands: Array.from({ length: numPlayers }, () => emptyResourceCounts()),
@@ -1130,12 +1139,12 @@ function maskGameState(G: GameState, pid: number | null): GameState {
  * Hotseat skips the opening-roll phase (quick start, deterministic tests) and
  * keeps hands open (playerView stripped).
  */
-export function createCatanGame(seed: number, numPlayers: number = 4) {
+export function createCatanGame(seed: number, numPlayers: number = 4, mapPreset?: string | null) {
   const { playerView: _hiddenForMultiplayer, ...openInformation } = catanGameConfig({ openingRoll: false })
   return {
     ...openInformation,
     setup(ctx: unknown) {
-      return CatanGame.setup(ctx, { seed, numPlayers })
+      return CatanGame.setup(ctx, { seed, numPlayers, mapPreset })
     },
   }
 }

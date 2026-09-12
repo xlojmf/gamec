@@ -910,7 +910,7 @@ describe('trading (M10)', () => {
     expect(G.hands[1]).toEqual({ wood: 0, brick: 0, grain: 0, wool: 1, ore: 0 })
   })
 
-  it('proposeTrade validation: self/bogus partner, identical resources, short hands, empty sides', () => {
+  it('proposeTrade validation: self/bogus partner, identical resources, proposer short, empty sides', () => {
     const G = mainG(11, [2, 0, 0, 0, 0])
     G.hands[1] = { wood: 1, brick: 1, grain: 0, wool: 0, ore: 0 }
     const events = fakeEvents({})
@@ -921,10 +921,40 @@ describe('trading (M10)', () => {
     expect(propose(9, oneOf('wood'), oneOf('brick'))).toBe(INVALID_MOVE) // bogus partner
     expect(propose(1, oneOf('wood'), oneOf('wood'))).toBe(INVALID_MOVE) // identical resources
     expect(propose(1, { wood: 3 }, oneOf('brick'))).toBe(INVALID_MOVE) // proposer short
-    expect(propose(1, oneOf('wood'), oneOf('grain'))).toBe(INVALID_MOVE) // partner short
     expect(propose(1, {}, oneOf('brick'))).toBe(INVALID_MOVE) // empty give
     expect(propose(1, oneOf('wood'), {})).toBe(INVALID_MOVE) // empty take
     expect(G.pendingTrade).toBeNull() // nothing slipped through
+  })
+
+  it('offers reach partners who cannot afford them — no information leak', () => {
+    const G = mainG(11, [2, 0, 0, 0, 0])
+    G.hands[1] = { wood: 1, brick: 1, grain: 0, wool: 0, ore: 0 } // no grain
+    G.hands[2] = { wood: 0, brick: 0, grain: 3, wool: 0, ore: 0 }
+    const events = fakeEvents({})
+
+    // asking for a card the partner doesn't hold is a LEGAL proposal — the
+    // offer must be shown to them (to decline/counter) so nobody can infer
+    // that a player lacks a resource from the offer never reaching them
+    expect(
+      mainMoves.proposeTrade({ G, ctx: ctx0, events, playerID: '0' }, [1, 2], oneOf('wood'), oneOf('grain')),
+    ).toBeUndefined()
+    expect(G.pendingTrade?.partners).toEqual([1, 2]) // BOTH recipients kept
+
+    // acceptance remains the legality gate: the short partner cannot accept…
+    expect(respondMoves.acceptTrade({ G, ctx: ctxRespond(1), playerID: '1' })).toBe(INVALID_MOVE)
+    expect(G.pendingTrade).not.toBeNull()
+    // …the funded partner still can…
+    expect(respondMoves.acceptTrade({ G, ctx: ctxRespond(2), playerID: '2' })).toBeUndefined()
+    expect(G.pendingTrade).toBeNull()
+    expect(G.hands[0].grain).toBe(1)
+    expect(G.hands[2].grain).toBe(2)
+    expect(G.hands[2].wood).toBe(1)
+
+    // …and a lone short partner can decline to clear the offer
+    mainMoves.proposeTrade({ G, ctx: ctx0, events, playerID: '0' }, 1, oneOf('wood'), oneOf('grain'))
+    expect(G.pendingTrade?.partners ?? [G.pendingTrade!.partner]).toEqual([1])
+    expect(respondMoves.declineTrade({ G, ctx: ctxRespond(1), playerID: '1' })).toBeUndefined()
+    expect(G.pendingTrade).toBeNull()
   })
 
   it('client: a pending offer locks the turn until the partner responds', () => {

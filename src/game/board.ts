@@ -13,6 +13,7 @@
  */
 
 import { mulberry32, shuffled } from './rng'
+import { mapPresetById } from './maps'
 import { RESOURCES, TERRAIN_COUNTS, type Resource, type Terrain } from './terrain'
 
 export const TILE_SIZE = 1
@@ -116,13 +117,18 @@ function eKey(a: string, b: string): string {
 /**
  * Generates the island:
  *  1. 19 hexes at axial distance ≤ 2 from the center.
- *  2. Terrain shuffled from the official 4/4/4/3/3/1 composition.
- *  3. Number tokens placed along the official clockwise spiral (outer ring → center).
- *  4. Fairness rule: no two red numbers (6/8) on adjacent hexes (reshuffled if violated).
+ *  2. Terrain shuffled from the official 4/4/4/3/3/1 composition — or taken
+ *     verbatim from a fixed `mapPreset` (curated tournament islands).
+ *  3. Number tokens placed along the official clockwise spiral (outer ring →
+ *     center), skipping the desert (official A–R chit rule).
+ *  4. Fairness rule: no two red numbers (6/8) on adjacent hexes (reshuffled
+ *     if violated — skipped for fixed presets, whose numbers are official).
  *  5. Vertices (54) and edges (72) deduplicated from hex corners.
- *  6. Ports (9) placed on every other boundary edge, kinds shuffled.
+ *  6. Ports (9) placed on every other boundary edge, kinds shuffled (even for
+ *     fixed presets — harbor layout stays a seeded surprise).
  */
-export function generateBoard(seed: number): Board {
+export function generateBoard(seed: number, mapPreset?: string | null): Board {
+  const preset = mapPresetById(mapPreset)
   const rnd = mulberry32(seed)
   /** Exact (unrounded) corner positions, keyed by the rounded vertex id. */
   const cornerExact = new Map<string, { x: number; z: number }>()
@@ -136,8 +142,16 @@ export function generateBoard(seed: number): Board {
   }
 
   // ---- 2. terrain -----------------------------------------------------------
-  const terrainPool: Terrain[] = TERRAIN_COUNTS.flatMap(([t, n]) => Array<Terrain>(n).fill(t))
-  const terrains = shuffled(terrainPool, rnd)
+  const tileTerrain = new Map<string, Terrain>()
+  if (preset) {
+    for (const [key, terrain] of Object.entries(preset.tiles)) tileTerrain.set(key, terrain)
+  } else {
+    const terrainPool: Terrain[] = TERRAIN_COUNTS.flatMap(([t, n]) => Array<Terrain>(n).fill(t))
+    const terrains = shuffled(terrainPool, rnd)
+    coords.forEach(([q, r], i) => tileTerrain.set(`${q},${r}`, terrains[i]))
+  }
+
+  const isDesertAt = (q: number, r: number) => tileTerrain.get(`${q},${r}`) === 'desert'
 
   // ---- 3+4. number tokens in spiral order, red-number fairness ---------------
   // Spiral: outer ring first (sorted by angle), then ring 1, then center.
@@ -151,10 +165,6 @@ export function generateBoard(seed: number): Board {
     return Math.atan2(pa.z, pa.x) - Math.atan2(pb.z, pb.x) // clockwise by angle
   })
 
-  const tileTerrain = new Map<string, Terrain>()
-  coords.forEach(([q, r], i) => tileTerrain.set(`${q},${r}`, terrains[i]))
-
-  const isDesertAt = (q: number, r: number) => tileTerrain.get(`${q},${r}`) === 'desert'
   const areRedNeighbors = (numbers: Map<string, number | null>): boolean => {
     for (const [q, r] of coords) {
       const n = numbers.get(`${q},${r}`)
@@ -168,11 +178,17 @@ export function generateBoard(seed: number): Board {
   }
 
   let numbers = new Map<string, number | null>()
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const values = shuffled(SPIRAL_NUMBERS, rnd)
+  if (preset) {
+    // fixed island: the official A–R chit sequence in spiral order, one pass
     let vi = 0
-    numbers = new Map(ordered.map(([q, r]) => [`${q},${r}`, isDesertAt(q, r) ? null : values[vi++]]))
-    if (!areRedNeighbors(numbers)) break
+    numbers = new Map(ordered.map(([q, r]) => [`${q},${r}`, isDesertAt(q, r) ? null : SPIRAL_NUMBERS[vi++]]))
+  } else {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const values = shuffled(SPIRAL_NUMBERS, rnd)
+      let vi = 0
+      numbers = new Map(ordered.map(([q, r]) => [`${q},${r}`, isDesertAt(q, r) ? null : values[vi++]]))
+      if (!areRedNeighbors(numbers)) break
+    }
   }
 
   // ---- tiles -----------------------------------------------------------------

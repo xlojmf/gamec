@@ -14,6 +14,8 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 export interface StoredRoom {
   matchID: string
   numPlayers: number
+  /** Fixed map preset id for the room's matches (null = random island). */
+  mapPreset?: string | null
   started: boolean
   creatorToken: string
   /** seat names captured at join (used by the rematch flow) */

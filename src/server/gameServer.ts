@@ -24,10 +24,11 @@
  *   PORT=8000 node dist/game/gameServer.js
  */
 
-import { Server, FlatFile } from 'boardgame.io/server'
+import { Server, FlatFile, SocketIO as BgioSocketIO } from 'boardgame.io/server'
 import { Client } from 'boardgame.io/client'
 import { SocketIO } from 'boardgame.io/multiplayer'
 import { CatanGame, boardFor, connectedRoadEdges, validSetupEdges, validSetupVertices } from '#/game/catan'
+import { MAP_PRESETS, mapPresetById } from '#/game/maps'
 import type { GameState } from '#/game/catan'
 import { RoomsStore, type StoredRoom } from './roomsStore'
 
@@ -104,17 +105,79 @@ interface FullState {
   ctx: BgioCtxShape
 }
 
+/** Minimal shape of the pieces of bgio's socket transport we touch. */
+interface PatchedTransport {
+  init(app: unknown, games: Array<{ name: string }>, origins?: unknown): void
+  getMatchQueue(matchID: string): { add(fn: () => unknown): Promise<unknown> }
+}
+
+interface PatchedApp {
+  _io?: { of(name: string): { use(fn: (socket: PatchedSocket, next: () => void) => void): void } }
+}
+
+interface PatchedSocket {
+  on(event: string, handler: (...args: never[]) => unknown): unknown
+}
+
+/**
+ * bgio 0.50's socket transport handles `sync` requests OUTSIDE the per-match
+ * FIFO queue that serializes `update` handling — two races can freeze a match
+ * when a client re-syncs mid-game (any socket reconnect does):
+ *
+ *   1. the socket is unregistered from the match's broadcast list for the
+ *      whole (async) sync — a broadcast in that window, e.g. a trade
+ *      proposal, is never delivered to it at all; and
+ *   2. the sync's db fetch can resolve before a concurrent move's write
+ *      commits, so the client receives a full-state snapshot OLDER than a
+ *      broadcast it already applied — 0.50's SYNC reducer replaces state
+ *      unconditionally, so a pending trade vanishes and the regressed
+ *      stateID makes every later move from that client "invalid stateID".
+ *
+ * A pending trade blocks all moves, so no further broadcast ever arrives to
+ * correct the rolled-back client: the table is stuck until a manual refresh.
+ * Routing every `sync` through the same per-match queue as `update` makes the
+ * wire strictly stateID-ordered — a sync either completes before a move's
+ * broadcast or fetches state after its write has committed.
+ */
+export function queuedSyncTransport() {
+  const transport = new BgioSocketIO() as unknown as PatchedTransport
+  const origInit = transport.init.bind(transport)
+  transport.init = (app: unknown, games: Array<{ name: string }>, origins?: unknown) => {
+    origInit(app, games, origins ?? [])
+    // socket.io namespace middleware runs BEFORE 'connection' listeners fire,
+    // so bgio registers its sync handler through our wrapping socket.on.
+    const nspApp = app as PatchedApp
+    for (const game of games) {
+      nspApp._io?.of(game.name).use((socket, next) => {
+        const origOn = socket.on.bind(socket)
+        socket.on = (event: string, handler: (...args: never[]) => unknown) => {
+          if (event !== 'sync') return origOn(event, handler)
+          return origOn(event, (...args: unknown[]) => {
+            const matchID = String(args[0] ?? '')
+            transport
+              .getMatchQueue(matchID)
+              .add(() => handler(...(args as never[])))
+              .catch((err) => console.error('[transport] queued sync failed:', err))
+          })
+        }
+        next()
+      })
+    }
+  }
+  return transport
+}
+
 /** Create a fresh match with the room's parameters (used by create + rematch). */
 async function createMatch(
   baseUrl: string,
-  opts: { numPlayers: number; playerNames?: string[] },
+  opts: { numPlayers: number; playerNames?: string[]; mapPreset?: string | null },
 ): Promise<string> {
   const seed = Math.floor(Math.random() * 0x7fffffff)
   const { matchID } = await lobbyApi(baseUrl, `/games/${CatanGame.name}/create`, {
     method: 'POST',
     body: JSON.stringify({
       numPlayers: opts.numPlayers,
-      setupData: { seed, numPlayers: opts.numPlayers, playerNames: opts.playerNames },
+      setupData: { seed, numPlayers: opts.numPlayers, playerNames: opts.playerNames, mapPreset: opts.mapPreset ?? null },
     }),
   })
   if (typeof matchID !== 'string') throw new Error('create returned no matchID')
@@ -122,15 +185,21 @@ async function createMatch(
 }
 
 /** Start ws + lobby + rooms API on `port` (used by the CLI and by e2e tests). */
-export async function startGameServer(port: number = PORT, opts: { turnTimeoutMs?: number } = {}): Promise<void> {
+export async function startGameServer(
+  port: number = PORT,
+  opts: { turnTimeoutMs?: number; db?: unknown } = {},
+): Promise<void> {
   const { app, db, run } = Server({
     games: [CatanGame],
-    ...(FLATFILE_DIR
-      ? {
-          // persisted matches — rooms/rooms.json rides along in the same dir
-          db: new FlatFile({ dir: FLATFILE_DIR, logging: false, ttl: false }) as never,
-        }
-      : {}),
+    transport: queuedSyncTransport() as never,
+    ...(opts.db
+      ? { db: opts.db as never }
+      : FLATFILE_DIR
+        ? {
+            // persisted matches — rooms/rooms.json rides along in the same dir
+            db: new FlatFile({ dir: FLATFILE_DIR, logging: false, ttl: false }) as never,
+          }
+        : {}),
     // Fan project with no accounts: accept any origin for ws + lobby API.
     origins: true,
   }) as unknown as GameServerLike
@@ -156,12 +225,14 @@ export async function startGameServer(port: number = PORT, opts: { turnTimeoutMs
       try {
         const body = await readJsonBody(ctx)
         const numPlayers = body.numPlayers === 3 ? 3 : 4
-        const matchID = await createMatch(BASE, { numPlayers })
+        const mapPreset = typeof body.map === 'string' && mapPresetById(body.map) ? body.map : null
+        const matchID = await createMatch(BASE, { numPlayers, mapPreset })
         let code = randomCode()
         while (rooms.has(code)) code = randomCode()
         rooms.set(code, {
           matchID,
           numPlayers,
+          mapPreset,
           started: false,
           creatorToken: randomToken(),
           seatNames: {},
@@ -169,9 +240,9 @@ export async function startGameServer(port: number = PORT, opts: { turnTimeoutMs
           updatedAt: '',
         })
         const room = rooms.get(code)!
-        console.log(`[rooms] ${code} → ${matchID} (${numPlayers} players)`)
+        console.log(`[rooms] ${code} → ${matchID} (${numPlayers} players${mapPreset ? `, map ${mapPreset}` : ''})`)
         ctx.status = 201
-        ctx.body = { code, matchID, numPlayers, creatorToken: room.creatorToken }
+        ctx.body = { code, matchID, numPlayers, mapPreset, presets: MAP_PRESETS.map((m) => m.id), creatorToken: room.creatorToken }
       } catch (err) {
         console.error('[rooms] create failed:', err instanceof Error ? err.message : err)
         ctx.status = 502
@@ -190,7 +261,7 @@ export async function startGameServer(port: number = PORT, opts: { turnTimeoutMs
       }
       const match = await lobbyApi(BASE, `/games/${CatanGame.name}/${entry.matchID}`)
       ctx.status = 200
-      ctx.body = { code: room[1], matchID: entry.matchID, started: entry.started, players: match.players }
+      ctx.body = { code: room[1], matchID: entry.matchID, started: entry.started, mapPreset: entry.mapPreset ?? null, players: match.players }
       return
     }
 
@@ -265,9 +336,9 @@ export async function startGameServer(port: number = PORT, opts: { turnTimeoutMs
         return
       }
       try {
-        // same room code & seats, fresh island — carried-over names, new credentials
+        // same room code & seats, fresh island — carried-over names + map, new credentials
         const names = Array.from({ length: entry.numPlayers }, (_, i) => entry.seatNames[String(i)])
-        entry.matchID = await createMatch(BASE, { numPlayers: entry.numPlayers, playerNames: names })
+        entry.matchID = await createMatch(BASE, { numPlayers: entry.numPlayers, playerNames: names, mapPreset: entry.mapPreset ?? null })
         entry.started = false
         entry.seatCredentials = {}
         rooms.set(rematch[1], entry)
@@ -522,7 +593,7 @@ export async function autoPlay(server: string, room: StoredRoom): Promise<void> 
 /** Robber destination candidates from the masked client state (public info). */
 function boardTileIds(G: GameState): string[] {
   // tile ids are the axial "q,r" strings — rebuild from the seed (pure, cached)
-  return boardFor(G.seed).tiles.map((t) => t.id)
+  return boardFor(G.seed, G.mapPreset).tiles.map((t) => t.id)
 }
 
 // CLI entry (skipped under vitest, which sets NODE_ENV=test)

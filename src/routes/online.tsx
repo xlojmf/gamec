@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { PLAYER_COLORS, PLAYER_NAMES } from '#/three/GameView'
+import { MAP_PRESETS, MapPreview } from '#/components/MapPreview'
+import { mapPresetById } from '#/game/maps'
 import {
   loadCreatorToken,
   loadMpSession,
@@ -42,6 +44,7 @@ function OnlinePage() {
 function LobbyHome({ onCreateOrJoin }: { onCreateOrJoin: (code: string) => void }) {
   const [joinCode, setJoinCode] = useState('')
   const [numPlayers, setNumPlayers] = useState<3 | 4>(4)
+  const [mapId, setMapId] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -52,7 +55,7 @@ function LobbyHome({ onCreateOrJoin }: { onCreateOrJoin: (code: string) => void 
       const res = await fetch(`${roomsApiBase()}/rooms`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ numPlayers }),
+        body: JSON.stringify({ numPlayers, map: mapId || null }),
       })
       if (!res.ok) throw new Error(String(res.status))
       const data = (await res.json()) as { code: string; creatorToken: string }
@@ -97,6 +100,35 @@ function LobbyHome({ onCreateOrJoin }: { onCreateOrJoin: (code: string) => void 
             {n}
           </button>
         ))}
+      </div>
+
+      <div className="map-picker" role="radiogroup" aria-label="island map">
+        <span className="alias-label">island</span>
+        <div className="map-picker-grid">
+          <button
+            role="radio"
+            aria-checked={mapId === ''}
+            className={`map-option ${mapId === '' ? 'map-option-active' : ''}`}
+            onClick={() => setMapId('')}
+          >
+            <MapPreview preset={null} size={96} />
+            <strong>🎲 Random island</strong>
+            <small>a fresh island every match</small>
+          </button>
+          {MAP_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              role="radio"
+              aria-checked={mapId === preset.id}
+              className={`map-option ${mapId === preset.id ? 'map-option-active' : ''}`}
+              onClick={() => setMapId(preset.id)}
+            >
+              <MapPreview preset={preset} size={96} />
+              <strong>{preset.name}</strong>
+              <small>{preset.source}</small>
+            </button>
+          ))}
+        </div>
       </div>
       <div className="hero-actions">
         <button className="btn btn-primary" disabled={busy} onClick={createRoom}>
@@ -292,6 +324,16 @@ function RoomView({ code }: { code: string }) {
       <h1>
         Take a <span className="accent">seat</span>
       </h1>
+
+      {room?.mapPreset && (
+        <div className="room-map">
+          <MapPreview preset={mapPresetById(room.mapPreset)} size={84} />
+          <div>
+            <strong>{mapPresetById(room.mapPreset)?.name ?? room.mapPreset}</strong>
+            <small>{mapPresetById(room.mapPreset)?.source}</small>
+          </div>
+        </div>
+      )}
 
       <div className="alias-row">
         <label className="alias-label" htmlFor="alias">
